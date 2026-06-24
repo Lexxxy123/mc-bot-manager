@@ -1,0 +1,135 @@
+import { db } from "@/db";
+import { bots } from "@/db/schema";
+import { desc, eq } from "drizzle-orm";
+import { getRuntimeView, startBot, resumeEnabledBots } from "@/lib/botManager";
+import { getCurrentUser } from "@/lib/auth";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+export async function GET() {
+  // Safety net: ensure enabled bots are resumed even if instrumentation
+  // didn't run (no-op after the first call).
+  void resumeEnabledBots();
+
+  const user = await getCurrentUser();
+  if (!user) {
+    return Response.json({ error: "Not authenticated" }, { status: 401 });
+  }
+  // Each user only sees their own bots.
+  const rows = await db
+    .select()
+    .from(bots)
+    .where(eq(bots.userId, user.id))
+    .orderBy(desc(bots.createdAt));
+  const data = rows.map((b) => {
+    const rt = getRuntimeView(b.id);
+    return {
+      id: b.id,
+      name: b.name,
+      username: b.username,
+      host: b.host,
+      port: b.port,
+      version: b.version,
+      proxy: b.proxy,
+      ytChannel: b.ytChannel,
+      beamIp: b.beamIp,
+      status: rt.status,
+      joined: rt.joined,
+      lastError: rt.lastError ?? b.lastError,
+      createdAt: b.createdAt,
+    };
+  });
+  return Response.json({
+    bots: data,
+    slots: user.botSlots,
+    used: data.length,
+  });
+}
+
+export async function POST(req: Request) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return Response.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  // Enforce per-user bot-slot limit.
+  const owned = await db
+    .select({ id: bots.id })
+    .from(bots)
+    .where(eq(bots.userId, user.id));
+  if (owned.length >= user.botSlots) {
+    return Response.json(
+      {
+        error: `You've used all ${user.botSlots} of your bot slots. Ask an admin for more.`,
+      },
+      { status: 403 },
+    );
+  }
+
+  let body: {
+    name?: string;
+    token?: string;
+    host?: string;
+    port?: number | string;
+    version?: string;
+    proxy?: string;
+    ytChannel?: string;
+  };
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const token = (body.token ?? "").trim();
+  const rawHost = (body.host ?? "").trim();
+  if (!token) {
+    return Response.json({ error: "A Minecraft token is required" }, { status: 400 });
+  }
+  if (!rawHost) {
+    return Response.json({ error: "A server address is required" }, { status: 400 });
+  }
+
+  // Allow "host:port" in the address field.
+  let host = rawHost;
+  let port = 25565;
+  if (body.port !== undefined && body.port !== "") {
+    const p = Number(body.port);
+    if (Number.isFinite(p) && p > 0 && p < 65536) port = Math.floor(p);
+  }
+  const colonIdx = rawHost.lastIndexOf(":");
+  if (colonIdx > -1 && !rawHost.includes("]")) {
+    const maybePort = Number(rawHost.slice(colonIdx + 1));
+    if (Number.isFinite(maybePort) && maybePort > 0 && maybePort < 65536) {
+      host = rawHost.slice(0, colonIdx);
+      port = Math.floor(maybePort);
+    }
+  }
+
+  const name = (body.name ?? "").trim() || host;
+  const version = (body.version ?? "").trim() || "auto";
+  const proxy = (body.proxy ?? "").trim();
+  const ytChannel = (body.ytChannel ?? "").trim() || "Alight.z";
+
+  const [inserted] = await db
+    .insert(bots)
+    .values({
+      userId: user.id,
+      name,
+      token,
+      host,
+      port,
+      version,
+      proxy,
+      ytChannel,
+      status: "connecting",
+      enabled: "true",
+    })
+    .returning();
+
+  // Kick off the connection (don't block the HTTP response on the full join).
+  void startBot(inserted);
+
+  return Response.json({ id: inserted.id }, { status: 201 });
+}

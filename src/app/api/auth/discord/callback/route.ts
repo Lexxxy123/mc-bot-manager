@@ -39,10 +39,17 @@ export async function GET(req: Request) {
       }),
     });
     if (!tokenRes.ok) {
+      const body = await tokenRes.text().catch(() => "(unreadable)");
+      console.error(
+        `[discord/callback] Token exchange failed — status: ${tokenRes.status}, body: ${body}`
+      );
       return Response.redirect(`${origin}/?error=token_exchange_failed`);
     }
     const tokenData = (await tokenRes.json()) as { access_token?: string };
     if (!tokenData.access_token) {
+      console.error(
+        "[discord/callback] Token exchange succeeded but response contained no access_token"
+      );
       return Response.redirect(`${origin}/?error=no_access_token`);
     }
 
@@ -51,6 +58,9 @@ export async function GET(req: Request) {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
     if (!meRes.ok) {
+      console.error(
+        `[discord/callback] User profile fetch failed — status: ${meRes.status}`
+      );
       return Response.redirect(`${origin}/?error=profile_failed`);
     }
     const me = (await meRes.json()) as {
@@ -60,19 +70,26 @@ export async function GET(req: Request) {
       avatar: string | null;
     };
 
-    const user = await upsertDiscordUser({
-      discordId: me.id,
-      username: me.global_name || me.username,
-      handle: me.username,
-      avatar: me.avatar
-        ? `https://cdn.discordapp.com/avatars/${me.id}/${me.avatar}.png`
-        : null,
-    });
+    let user;
+    try {
+      user = await upsertDiscordUser({
+        discordId: me.id,
+        username: me.global_name || me.username,
+        handle: me.username,
+        avatar: me.avatar
+          ? `https://cdn.discordapp.com/avatars/${me.id}/${me.avatar}.png`
+          : null,
+      });
+    } catch (dbErr) {
+      console.error("[discord/callback] Database upsert failed:", dbErr);
+      return NextResponse.redirect(`${origin}/?error=oauth_error`);
+    }
 
     const res = NextResponse.redirect(`${origin}/`);
     attachSessionCookie(res, user.id);
     return res;
-  } catch {
+  } catch (err) {
+    console.error("[discord/callback] Unexpected error during OAuth flow:", err);
     return NextResponse.redirect(`${origin}/?error=oauth_error`);
   }
 }

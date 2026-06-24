@@ -1,12 +1,21 @@
-// Central config. Prefers platform env vars, falls back to provided values so
-// the app works even though the sandbox resets .env on each deploy.
-// NOTE: for production you should move these into managed env secrets.
+// Central config. Reads from environment variables.
+// DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET are required — the app will
+// throw at startup if they are missing so misconfiguration is caught early.
 
-export const DISCORD_CLIENT_ID =
-  process.env.DISCORD_CLIENT_ID || "1519233967344058378";
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `Missing required environment variable: ${name}. ` +
+        `Set it in your Railway service variables before deploying.`
+    );
+  }
+  return value;
+}
 
-export const DISCORD_CLIENT_SECRET =
-  process.env.DISCORD_CLIENT_SECRET || "cPlhLgeSQxM7mKbYL4ogh4OAMb1M_r2d";
+export const DISCORD_CLIENT_ID = requireEnv("DISCORD_CLIENT_ID");
+
+export const DISCORD_CLIENT_SECRET = requireEnv("DISCORD_CLIENT_SECRET");
 
 export const SESSION_SECRET =
   process.env.SESSION_SECRET ||

@@ -4,6 +4,9 @@ import {
   dropHeldItem,
   startBeam,
   stopBeam,
+  moveBot,
+  clickWindowSlot,
+  closeWindow,
 } from "@/lib/botManager";
 import { authorizeBot } from "@/lib/auth";
 
@@ -19,7 +22,7 @@ export async function POST(
   if (!auth.ok) {
     return Response.json({ error: "Forbidden" }, { status: 403 });
   }
-  let body: { action?: string; slot?: number };
+  let body: { action?: string; slot?: number; dir?: string };
   try {
     body = await req.json();
   } catch {
@@ -37,6 +40,15 @@ export async function POST(
       break;
     case "drop":
       result = await dropHeldItem(id);
+      break;
+    case "move":
+      result = await moveBot(id, body.dir ?? "forward");
+      break;
+    case "clickWindow":
+      result = await clickWindowSlot(id, Number(body.slot ?? 0));
+      break;
+    case "closeWindow":
+      result = await closeWindow(id);
       break;
     case "beam":
     case "beam_start":

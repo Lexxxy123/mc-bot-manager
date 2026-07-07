@@ -4,10 +4,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "npx drizzle-kit push && next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
-    "db:generate": "drizzle-kit generate"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "dotenv": "17.3.1",

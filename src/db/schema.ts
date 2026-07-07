@@ -35,6 +35,20 @@ export const bots = pgTable("bots", {
   ytChannel: text("yt_channel").notNull().default("Alight.z"),
   // Server IP the beam AI shares with players who can't use discord
   beamIp: text("beam_ip").notNull().default("badlion-pvp.xyz"),
+  // Discord username to hand out
+  discordUser: text("discord_user").notNull().default("stood014"),
+  // Bot Engine: "mineflayer" (Full UI) or "nmp" (Raw Protocol Bypass)
+  engine: text("engine").notNull().default("mineflayer"),
+  // Beam type: "ai" or "spam"
+  beamType: text("beam_type").notNull().default("ai"),
+  // Spam message
+  spamMessage: text("spam_message").notNull().default("join my smp guys /msg me"),
+  // Spam interval in ms
+  spamInterval: integer("spam_interval").notNull().default(60000),
+  // Spam trigger word
+  spamTriggerWord: text("spam_trigger_word").notNull().default("123"),
+  // Spam reply message
+  spamReplyMessage: text("spam_reply_message").notNull().default("add my discord stood014 to join"),
   // Last known status: offline | connecting | online | error
   status: text("status").notNull().default("offline"),
   lastError: text("last_error"),

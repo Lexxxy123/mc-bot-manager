@@ -1,30 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-
-type BotStatus = "offline" | "connecting" | "online" | "error";
-
-type BotItem = {
-  id: string;
-  name: string;
-  username: string | null;
-  host: string;
-  port: number;
-  version: string;
-  proxy: string;
-  ytChannel: string;
-  beamIp: string;
-  status: BotStatus;
-  joined: boolean;
-  lastError: string | null;
-  createdAt: string;
-};
-
-type LogEntry = {
-  ts: number;
-  level: "info" | "chat" | "error" | "system";
-  line: string;
-};
+import { BotItem, BotStatus, LogEntry } from "./types";
+import BotDetailView from "./BotDetailView";
 
 const STATUS_META: Record<
   BotStatus,
@@ -84,9 +62,8 @@ export default function BotDashboard() {
   const [items, setItems] = useState<BotItem[]>([]);
   const [slots, setSlots] = useState<number>(0);
   const [showAdd, setShowAdd] = useState(false);
-  const [consoleId, setConsoleId] = useState<string | null>(null);
+  const [activeBotId, setActiveBotId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
-  const [viewId, setViewId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -110,9 +87,8 @@ export default function BotDashboard() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  const consoleBot = items.find((b) => b.id === consoleId) ?? null;
+  const activeBot = items.find((b) => b.id === activeBotId) ?? null;
   const editBot = items.find((b) => b.id === editId) ?? null;
-  const viewBot = items.find((b) => b.id === viewId) ?? null;
 
   return (
     <div>
@@ -147,45 +123,58 @@ export default function BotDashboard() {
         </button>
       </header>
 
-      <nav className="mt-6 flex gap-1 rounded-xl border border-slate-800 bg-slate-900/60 p-1 text-sm">
-        {(["bots", "about"] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`flex-1 rounded-lg px-3 py-2 font-medium capitalize transition ${
-              tab === t
-                ? "bg-slate-800 text-white shadow"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            {t === "bots" ? `Bots (${items.length})` : "How it works"}
-          </button>
-        ))}
-      </nav>
+      {!activeBot ? (
+        <>
+          <nav className="mt-6 flex gap-1 rounded-xl border border-slate-800 bg-slate-900/60 p-1 text-sm">
+            {(["bots", "about"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`flex-1 rounded-lg px-3 py-2 font-medium capitalize transition ${
+                  tab === t
+                    ? "bg-slate-800 text-white shadow"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {t === "bots" ? `Bots (${items.length})` : "How it works"}
+              </button>
+            ))}
+          </nav>
 
-      {tab === "bots" ? (
-        <section className="mt-6">
-          {!loaded ? (
-            <p className="py-16 text-center text-slate-500">Loading…</p>
-          ) : items.length === 0 ? (
-            <EmptyState onAdd={() => setShowAdd(true)} />
+          {tab === "bots" ? (
+            <section className="mt-6 animate-fade-in">
+              {!loaded ? (
+                <p className="py-16 text-center text-slate-500">Loading…</p>
+              ) : items.length === 0 ? (
+                <EmptyState onAdd={() => setShowAdd(true)} />
+              ) : (
+                <ul className="grid gap-4">
+                  {items.map((bot) => (
+                    <BotCard
+                      key={bot.id}
+                      bot={bot}
+                      onChanged={refresh}
+                      onSelect={() => setActiveBotId(bot.id)}
+                      onEdit={() => setEditId(bot.id)}
+                    />
+                  ))}
+                </ul>
+              )}
+            </section>
           ) : (
-            <ul className="grid gap-4">
-              {items.map((bot) => (
-                <BotCard
-                  key={bot.id}
-                  bot={bot}
-                  onChanged={refresh}
-                  onConsole={() => setConsoleId(bot.id)}
-                  onEdit={() => setEditId(bot.id)}
-                  onView={() => setViewId(bot.id)}
-                />
-              ))}
-            </ul>
+            <AboutPanel />
           )}
-        </section>
+        </>
       ) : (
-        <AboutPanel />
+        <div className="mt-6 animate-pop-in">
+          <button
+            onClick={() => setActiveBotId(null)}
+            className="mb-4 inline-flex items-center gap-2 text-sm font-medium text-slate-400 transition hover:text-white"
+          >
+            ← Back to Bots
+          </button>
+          <BotDetailView bot={activeBot} onChanged={refresh} />
+        </div>
       )}
 
       {showAdd && (
@@ -198,10 +187,6 @@ export default function BotDashboard() {
         />
       )}
 
-      {consoleBot && (
-        <ConsoleModal bot={consoleBot} onClose={() => setConsoleId(null)} />
-      )}
-
       {editBot && (
         <EditBotModal
           bot={editBot}
@@ -212,15 +197,11 @@ export default function BotDashboard() {
           }}
         />
       )}
-
-      {viewBot && (
-        <ViewModal bot={viewBot} onClose={() => setViewId(null)} />
-      )}
     </div>
   );
 }
 
-function StatusBadge({ status }: { status: BotStatus }) {
+export function StatusBadge({ status }: { status: BotStatus }) {
   const meta = STATUS_META[status];
   return (
     <span
@@ -232,18 +213,56 @@ function StatusBadge({ status }: { status: BotStatus }) {
   );
 }
 
+export function BotAvatar({
+  username,
+  status,
+  className,
+}: {
+  username: string | null;
+  status: BotStatus;
+  className: string;
+}) {
+  const [error, setError] = useState(false);
+  const showImg = username && !error;
+  
+  return (
+    <div
+      className={`relative flex shrink-0 items-center justify-center overflow-hidden ring-1 ${className} ${
+        status === "online"
+          ? "bg-emerald-500/15 ring-emerald-500/30"
+          : status === "connecting"
+            ? "bg-amber-500/15 ring-amber-500/30"
+            : status === "error"
+              ? "bg-rose-500/15 ring-rose-500/30"
+              : "bg-slate-700/30 ring-slate-600/40"
+      }`}
+    >
+      {showImg ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={`https://visage.surgeplay.com/bust/256/${username}?y=-40`}
+          alt={username}
+          onError={() => setError(true)}
+          className="mt-2 h-full w-full object-contain drop-shadow-md scale-125"
+          style={{ imageRendering: "pixelated" }}
+        />
+      ) : (
+        "🤖"
+      )}
+    </div>
+  );
+}
+
 function BotCard({
   bot,
   onChanged,
-  onConsole,
+  onSelect,
   onEdit,
-  onView,
 }: {
   bot: BotItem;
   onChanged: () => void;
-  onConsole: () => void;
+  onSelect: () => void;
   onEdit: () => void;
-  onView: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const running = bot.status === "online" || bot.status === "connecting";
@@ -262,19 +281,11 @@ function BotCard({
     <li className="card-hover glass rounded-2xl p-4 shadow-lg shadow-black/20">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
-          <div
-            className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl text-lg ring-1 ${
-              bot.status === "online"
-                ? "bg-emerald-500/15 ring-emerald-500/30"
-                : bot.status === "connecting"
-                  ? "bg-amber-500/15 ring-amber-500/30"
-                  : bot.status === "error"
-                    ? "bg-rose-500/15 ring-rose-500/30"
-                    : "bg-slate-700/30 ring-slate-600/40"
-            }`}
-          >
-            🤖
-          </div>
+          <BotAvatar
+            username={bot.username}
+            status={bot.status}
+            className="h-11 w-11 rounded-xl text-lg"
+          />
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="truncate text-base font-semibold">{bot.name}</h3>
@@ -299,22 +310,10 @@ function BotCard({
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           <button
-            onClick={onView}
-            disabled={bot.status !== "online"}
-            title={
-              bot.status === "online"
-                ? "Open the live bot view"
-                : "Bot must be online to view"
-            }
-            className="rounded-lg border border-sky-700/60 bg-sky-600/20 px-3 py-1.5 text-sm font-medium text-sky-200 transition hover:bg-sky-600/30 disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={onSelect}
+            className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-sm font-semibold text-emerald-400 transition hover:bg-emerald-500/20"
           >
-            👁 View as bot
-          </button>
-          <button
-            onClick={onConsole}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 transition hover:bg-slate-700"
-          >
-            Console
+            Control Center →
           </button>
           <button
             onClick={onEdit}
@@ -402,6 +401,8 @@ function AddBotModal({
   const [port, setPort] = useState("25565");
   const [version, setVersion] = useState("auto");
   const [proxy, setProxy] = useState("");
+  const [discordUser, setDiscordUser] = useState("stood014");
+  const [engine, setEngine] = useState("mineflayer");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -414,7 +415,7 @@ function AddBotModal({
       const res = await fetch("/api/bots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, token, host, port, version, proxy }),
+        body: JSON.stringify({ name, token, host, port, version, proxy, discordUser, engine }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -431,28 +432,28 @@ function AddBotModal({
 
   return (
     <Overlay onClose={onClose}>
-      <div className="glass max-h-[88vh] w-full max-w-lg overflow-y-auto rounded-3xl p-6 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-          <div className="flex items-center gap-3">
-            <div className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-emerald-500 to-green-700 text-lg shadow-lg shadow-emerald-900/40">
+      <div className="premium-modal flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-[24px]">
+        <div className="flex items-center justify-between border-b border-white/5 bg-white/[0.02] px-6 py-5">
+          <div className="flex items-center gap-4">
+            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-700 text-xl shadow-[0_0_20px_-5px_rgba(16,185,129,0.5)]">
               ＋
             </div>
             <div>
-              <h2 className="text-lg font-semibold">Add a bot</h2>
-              <p className="text-xs text-slate-400">
+              <h2 className="text-xl font-bold tracking-tight text-white">Add a bot</h2>
+              <p className="text-xs font-medium text-slate-400">
                 Connect a Minecraft account to a server
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-800 hover:text-white"
+            className="grid h-8 w-8 place-items-center rounded-full bg-white/5 text-slate-400 transition hover:bg-white/10 hover:text-white"
           >
             ✕
           </button>
         </div>
 
-        <div className="mt-5 space-y-4">
+        <div className="overflow-y-auto p-6 space-y-5">
           <Field label="Bot name (optional)">
             <input
               value={name}
@@ -527,6 +528,32 @@ function AddBotModal({
             />
           </Field>
 
+          <Field
+            label="Discord Username (for Beam AI)"
+            hint="The Discord tag the bot will ask the player to add."
+          >
+            <input
+              value={discordUser}
+              onChange={(e) => setDiscordUser(e.target.value)}
+              placeholder="stood014"
+              className={inputClass}
+            />
+          </Field>
+
+          <Field
+            label="Bot Engine"
+            hint="Mineflayer includes Radar/Beam. Raw NMP uses your stealth bypass snippet (console only)."
+          >
+            <select
+              value={engine}
+              onChange={(e) => setEngine(e.target.value)}
+              className={inputClass}
+            >
+              <option value="mineflayer">Mineflayer (Full Features)</option>
+              <option value="nmp">Raw NMP (Stealth Bypass)</option>
+            </select>
+          </Field>
+
           {error && (
             <p className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-300 ring-1 ring-rose-500/20">
               {error}
@@ -534,17 +561,17 @@ function AddBotModal({
           )}
         </div>
 
-        <div className="mt-6 flex justify-end gap-2">
+        <div className="flex justify-end gap-3 border-t border-white/5 bg-black/20 p-5">
           <button
             onClick={onClose}
-            className="rounded-xl border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800"
+            className="rounded-xl border border-white/10 px-5 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/5 hover:text-white"
           >
             Cancel
           </button>
           <button
             onClick={submit}
             disabled={submitting}
-            className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            className="rounded-xl bg-gradient-to-b from-emerald-400 to-emerald-500 px-5 py-2.5 text-sm font-bold text-emerald-950 shadow-[0_0_20px_-5px_rgba(16,185,129,0.4)] transition hover:from-emerald-300 hover:to-emerald-400 disabled:opacity-50"
           >
             {submitting ? "Creating…" : "Create & connect"}
           </button>
@@ -554,176 +581,117 @@ function AddBotModal({
   );
 }
 
-function ConsoleModal({ bot, onClose }: { bot: BotItem; onClose: () => void }) {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [status, setStatus] = useState<BotStatus>(bot.status);
-  const [msg, setMsg] = useState("");
-  const [beam, setBeam] = useState<{ looping: boolean; stage: string }>({
-    looping: false,
-    stage: "",
-  });
-  const [acting, setActing] = useState(false);
-  const scroller = useRef<HTMLDivElement>(null);
-  const stickToBottom = useRef(true);
-
-  const poll = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/bots/${bot.id}/console`, {
-        cache: "no-store",
-      });
-      const data = await res.json();
-      setLogs(data.logs ?? []);
-      setStatus(data.status ?? "offline");
-      setBeam(data.beam ?? { looping: false, stage: "" });
-    } catch {
-      /* ignore */
-    }
-  }, [bot.id]);
-
-  async function toggleBeam() {
-    setActing(true);
-    try {
-      await fetch(`/api/bots/${bot.id}/action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: beam.looping ? "beam_stop" : "beam_start",
-        }),
-      });
-      await poll();
-    } finally {
-      setActing(false);
-    }
-  }
-
-  useEffect(() => {
-    poll();
-    const t = setInterval(poll, 1500);
-    return () => clearInterval(t);
-  }, [poll]);
-
-  useEffect(() => {
-    const el = scroller.current;
-    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [logs]);
-
-  async function send() {
-    const m = msg.trim();
-    if (!m) return;
-    setMsg("");
-    await fetch(`/api/bots/${bot.id}/console`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: m }),
-    });
-    poll();
-  }
-
+function AboutPanel() {
   return (
-    <Overlay onClose={onClose}>
-      <div className="glass flex h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl shadow-2xl">
-        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-          <div className="flex items-center gap-3">
-            <h2 className="font-semibold">{bot.name}</h2>
-            <StatusBadge status={status} />
-            {beam.looping && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-fuchsia-500/15 px-2 py-0.5 text-xs font-medium text-fuchsia-300 ring-1 ring-fuchsia-500/30">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-fuchsia-400" />
-                beam: {beam.stage || "running"}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {beam.looping ? (
-              <button
-                onClick={toggleBeam}
-                disabled={acting}
-                className="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-rose-950 transition hover:bg-rose-400 disabled:opacity-40"
-              >
-                ⏹ Stop Beam
-              </button>
-            ) : (
-              <button
-                onClick={toggleBeam}
-                disabled={acting || status !== "online"}
-                title="Start the beam loop from the console"
-                className="rounded-lg bg-fuchsia-500 px-3 py-1.5 text-xs font-semibold text-fuchsia-950 transition hover:bg-fuchsia-400 disabled:opacity-40"
-              >
-                📡 Beam
-              </button>
-            )}
-            <button
-              onClick={onClose}
-              className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-
-        <div
-          ref={scroller}
-          onScroll={(e) => {
-            const el = e.currentTarget;
-            stickToBottom.current =
-              el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-          }}
-          className="flex-1 overflow-y-auto bg-slate-950/70 p-4 font-mono text-xs leading-relaxed"
-        >
-          {logs.length === 0 ? (
-            <p className="text-slate-600">No output yet…</p>
-          ) : (
-            logs.map((l, i) => {
-              const w = whisperKind(l.line);
-              return (
-                <div key={i} className="whitespace-pre-wrap break-words">
-                  <span className="text-slate-600">
-                    {new Date(l.ts).toLocaleTimeString()}{" "}
-                  </span>
-                  {w === "from" ? (
-                    <span className="rounded bg-cyan-500/15 px-1 font-semibold text-cyan-300 ring-1 ring-cyan-500/30">
-                      {l.line}
-                    </span>
-                  ) : w === "to" ? (
-                    <span className="rounded bg-fuchsia-500/15 px-1 font-semibold text-fuchsia-300 ring-1 ring-fuchsia-500/30">
-                      {l.line}
-                    </span>
-                  ) : (
-                    <span className={logColor(l.level)}>{l.line}</span>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
-
-        <div className="flex gap-2 border-t border-slate-800 p-3">
-          <input
-            value={msg}
-            onChange={(e) => setMsg(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder={
-              status === "online"
-                ? "Type a chat message or command…"
-                : "Bot must be online to chat"
-            }
-            disabled={status !== "online"}
-            className={`${inputClass} flex-1 font-mono text-xs disabled:opacity-50`}
-          />
-          <button
-            onClick={send}
-            disabled={status !== "online"}
-            className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
-          >
-            Send
-          </button>
-        </div>
-      </div>
-    </Overlay>
+    <section className="mt-6 space-y-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-6 text-sm leading-relaxed text-slate-300">
+      <h2 className="text-base font-semibold text-white">How it works</h2>
+      <ol className="list-decimal space-y-2 pl-5">
+        <li>
+          Click <b>Add bot</b> and paste your Minecraft access token (the bearer
+          / Yggdrasil token issued after you log in at minecraft.net).
+        </li>
+        <li>
+          Enter the <b>server IP</b> (e.g. <code>play.example.net</code> or{" "}
+          <code>1.2.3.4:25565</code>).
+        </li>
+        <li>
+          The server validates the token against Minecraft services, resolves
+          your username, and connects with <code>mineflayer</code>.
+        </li>
+        <li>
+          Each bot shows whether it <b>joined</b> the server, and you can open
+          the <b>Console</b> to watch chat and send messages.
+        </li>
+      </ol>
+      <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-amber-300 ring-1 ring-amber-500/20">
+        Note: tokens are short-lived. If a join fails with an auth error, grab a
+        fresh token. Bots only run while this server process is alive.
+      </p>
+      <p className="rounded-lg bg-sky-500/10 px-3 py-2 text-sky-300 ring-1 ring-sky-500/20">
+        Seeing <b>&quot;Disconnected: socketClosed&quot;</b>? That usually means a
+        version mismatch through the server&apos;s proxy. Re-create the bot and
+        set the exact <b>Minecraft version</b> the server runs. The manager also
+        fetches your chat-signing certificates automatically so chat works on
+        1.19+ servers.
+      </p>
+    </section>
   );
 }
 
-function EditBotModal({
+function Overlay({
+  children,
+  onClose,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+      <div
+        className="absolute inset-0 animate-fade-in bg-[#030712]/80 backdrop-blur-xl"
+        onClick={onClose}
+      />
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative z-10 flex w-full animate-pop-in justify-center"
+      >
+        {/* Subtle under-glow for the modal */}
+        <div className="absolute -inset-1 z-[-1] rounded-[2rem] bg-gradient-to-b from-emerald-500/20 to-indigo-500/10 blur-xl opacity-60" />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-sm font-medium text-slate-300">
+        {label}
+      </span>
+      {children}
+      {hint && <span className="mt-1 block text-xs text-slate-500">{hint}</span>}
+    </label>
+  );
+}
+
+const inputClass =
+  "w-full rounded-xl border border-slate-700/80 bg-slate-950/60 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 outline-none transition focus:border-emerald-500/60 focus:bg-slate-950/80 focus:ring-2 focus:ring-emerald-500/20";
+
+function logColor(level: LogEntry["level"]) {
+  switch (level) {
+    case "error":
+      return "text-rose-300";
+    case "system":
+      return "text-sky-300";
+    case "chat":
+      return "text-slate-200";
+    default:
+      return "text-slate-300";
+  }
+}
+
+// Detect private-message (whisper) lines so we can highlight them.
+// Returns "from" (incoming DM), "to" (outgoing DM), or null.
+function whisperKind(line: string): "from" | "to" | null {
+  const l = line.toLowerCase();
+  // Don't color our own injected "<you → X>" log line.
+  if (/<you\s*→/.test(line)) return null;
+  if (/\(from\b/.test(l) || /^\s*from\s+\w+/.test(l) || /whispers to you/.test(l))
+    return "from";
+  if (/\(to\b/.test(l) || /\byou whisper to\b/.test(l)) return "to";
+  return null;
+}
+
+export function EditBotModal({
   bot,
   onClose,
   onSaved,
@@ -739,6 +707,12 @@ function EditBotModal({
   const [proxy, setProxy] = useState(bot.proxy || "");
   const [ytChannel, setYtChannel] = useState(bot.ytChannel || "Alight.z");
   const [beamIp, setBeamIp] = useState(bot.beamIp || "badlion-pvp.xyz");
+  const [discordUser, setDiscordUser] = useState(bot.discordUser || "stood014");
+  const [beamType, setBeamType] = useState(bot.beamType || "ai");
+  const [spamMessage, setSpamMessage] = useState(bot.spamMessage || "join my smp guys /msg me");
+  const [spamInterval, setSpamInterval] = useState(String(bot.spamInterval || 60000));
+  const [spamTriggerWord, setSpamTriggerWord] = useState(bot.spamTriggerWord || "123");
+  const [spamReplyMessage, setSpamReplyMessage] = useState(bot.spamReplyMessage || "add my discord stood014 to join");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -752,6 +726,12 @@ function EditBotModal({
       proxy?: string;
       ytChannel?: string;
       beamIp?: string;
+      discordUser?: string;
+      beamType?: string;
+      spamMessage?: string;
+      spamInterval?: number;
+      spamTriggerWord?: string;
+      spamReplyMessage?: string;
     } = {};
     if (token.trim()) payload.token = token.trim();
     if (version !== bot.version) payload.version = version;
@@ -762,15 +742,19 @@ function EditBotModal({
       payload.ytChannel = ytChannel.trim();
     if (beamIp.trim() && beamIp.trim() !== (bot.beamIp || ""))
       payload.beamIp = beamIp.trim();
-    if (
-      !payload.token &&
-      !payload.version &&
-      !payload.host &&
-      !payload.port &&
-      payload.proxy === undefined &&
-      !payload.ytChannel &&
-      !payload.beamIp
-    ) {
+    if (discordUser.trim() && discordUser.trim() !== (bot.discordUser || ""))
+      payload.discordUser = discordUser.trim();
+    if (beamType !== bot.beamType) payload.beamType = beamType;
+    if (spamMessage.trim() && spamMessage.trim() !== (bot.spamMessage || ""))
+      payload.spamMessage = spamMessage.trim();
+    if (spamInterval && Number(spamInterval) !== bot.spamInterval)
+      payload.spamInterval = Number(spamInterval);
+    if (spamTriggerWord.trim() && spamTriggerWord.trim() !== (bot.spamTriggerWord || ""))
+      payload.spamTriggerWord = spamTriggerWord.trim();
+    if (spamReplyMessage.trim() && spamReplyMessage.trim() !== (bot.spamReplyMessage || ""))
+      payload.spamReplyMessage = spamReplyMessage.trim();
+      
+    if (Object.keys(payload).length === 0) {
       setError("Change a field to save.");
       return;
     }
@@ -796,15 +780,15 @@ function EditBotModal({
 
   return (
     <Overlay onClose={onClose}>
-      <div className="glass max-h-[88vh] w-full max-w-lg overflow-y-auto rounded-3xl p-6 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-          <div className="flex items-center gap-3">
-            <div className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-slate-600 to-slate-800 text-lg ring-1 ring-slate-600/50">
+      <div className="premium-modal flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-[24px]">
+        <div className="flex items-center justify-between border-b border-white/5 bg-white/[0.02] px-6 py-5">
+          <div className="flex items-center gap-4">
+            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-slate-600 to-slate-800 text-xl shadow-lg ring-1 ring-slate-600/50">
               ⚙
             </div>
             <div className="min-w-0">
-              <h2 className="truncate text-lg font-semibold">{bot.name}</h2>
-              <p className="truncate text-xs text-slate-400">
+              <h2 className="truncate text-lg font-bold text-white">{bot.name}</h2>
+              <p className="truncate text-xs font-medium text-slate-400">
                 {bot.host}:{bot.port}
                 {bot.username ? ` · ${bot.username}` : ""}
               </p>
@@ -812,13 +796,13 @@ function EditBotModal({
           </div>
           <button
             onClick={onClose}
-            className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-800 hover:text-white"
+            className="grid h-8 w-8 place-items-center rounded-full bg-white/5 text-slate-400 transition hover:bg-white/10 hover:text-white"
           >
             ✕
           </button>
         </div>
 
-        <div className="mt-5 space-y-4">
+        <div className="overflow-y-auto p-6 space-y-5">
           <Field
             label="New Minecraft token"
             hint="Paste a fresh minecraft.net / bearer (access) token. Leave blank to keep the current one."
@@ -908,6 +892,77 @@ function EditBotModal({
             />
           </Field>
 
+          <Field
+            label="Discord Username (for Beam AI)"
+            hint="The Discord tag the bot will ask the player to add."
+          >
+            <input
+              value={discordUser}
+              onChange={(e) => setDiscordUser(e.target.value)}
+              placeholder="stood014"
+              className={inputClass}
+            />
+          </Field>
+
+          <Field
+            label="Bot Engine"
+            hint="Mineflayer includes Radar/Beam. Raw NMP uses your stealth bypass snippet (console only)."
+          >
+            <div className="rounded-xl border border-slate-700/80 bg-slate-950/60 px-3.5 py-2.5 text-sm text-slate-400">
+              Only editable on creation. Delete and recreate to change engine.
+            </div>
+          </Field>
+          
+          <div className="border-t border-slate-800 pt-4 mt-4">
+            <h3 className="text-sm font-semibold text-slate-300 mb-4">Beam Settings</h3>
+            <div className="space-y-4">
+              <Field label="Beam Type">
+                <select
+                  value={beamType}
+                  onChange={(e) => setBeamType(e.target.value)}
+                  className={inputClass}
+                >
+                  <option value="ai">AI Beaming (Player-to-Player)</option>
+                  <option value="spam">Spam Beaming</option>
+                </select>
+              </Field>
+
+              {beamType === "spam" && (
+                <>
+                  <Field label="Spam Message" hint="The message to send periodically.">
+                    <input
+                      value={spamMessage}
+                      onChange={(e) => setSpamMessage(e.target.value)}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label="Spam Interval (ms)" hint="How often to send the spam message. E.g., 60000 = 1 minute.">
+                    <input
+                      type="number"
+                      value={spamInterval}
+                      onChange={(e) => setSpamInterval(e.target.value)}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label="Trigger Word" hint="If a player says this in chat, the bot will whisper them the reply message.">
+                    <input
+                      value={spamTriggerWord}
+                      onChange={(e) => setSpamTriggerWord(e.target.value)}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label="Reply Message" hint="The whisper to send when the trigger word is said.">
+                    <input
+                      value={spamReplyMessage}
+                      onChange={(e) => setSpamReplyMessage(e.target.value)}
+                      className={inputClass}
+                    />
+                  </Field>
+                </>
+              )}
+            </div>
+          </div>
+
           {error && (
             <p className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-300 ring-1 ring-rose-500/20">
               {error}
@@ -920,17 +975,17 @@ function EditBotModal({
           </p>
         </div>
 
-        <div className="mt-6 flex justify-end gap-2">
+        <div className="flex justify-end gap-3 border-t border-white/5 bg-black/20 p-5">
           <button
             onClick={onClose}
-            className="rounded-xl border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800"
+            className="rounded-xl border border-white/10 px-5 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/5 hover:text-white"
           >
             Cancel
           </button>
           <button
             onClick={save}
             disabled={saving}
-            className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            className="rounded-xl bg-gradient-to-b from-emerald-400 to-emerald-500 px-5 py-2.5 text-sm font-bold text-emerald-950 shadow-[0_0_20px_-5px_rgba(16,185,129,0.4)] transition hover:from-emerald-300 hover:to-emerald-400 disabled:opacity-50"
           >
             {saving ? "Saving…" : "Save changes"}
           </button>
@@ -940,593 +995,3 @@ function EditBotModal({
   );
 }
 
-type ViewEntity = {
-  name: string;
-  type: string;
-  kind: "player" | "mob" | "object" | "other";
-  forward: number;
-  right: number;
-  dy: number;
-  distance: number;
-  bearing: number;
-};
-
-type HotbarItem = {
-  slot: number;
-  name: string | null;
-  displayName: string | null;
-  count: number;
-  selected: boolean;
-};
-
-type ViewSnapshot = {
-  available: boolean;
-  username?: string;
-  position?: { x: number; y: number; z: number };
-  yaw?: number;
-  pitch?: number;
-  facing?: string;
-  health?: number;
-  food?: number;
-  dimension?: string;
-  timeOfDay?: number;
-  isDay?: boolean;
-  heldItem?: string | null;
-  lookingAt?: { name: string; x: number; y: number; z: number } | null;
-  entities?: ViewEntity[];
-  nearbyBlocks?: { name: string; forward: number; right: number; dy: number }[];
-  hotbar?: HotbarItem[];
-  selectedSlot?: number;
-  using?: boolean;
-};
-
-const ITEM_IMG_VERSION = "1.21.4";
-
-function itemImageUrl(name: string, dir: "item" | "block"): string {
-  return `https://assets.mcasset.cloud/${ITEM_IMG_VERSION}/assets/minecraft/textures/${dir}/${name}.png`;
-}
-
-function ItemIcon({ name }: { name: string }) {
-  // Try the item texture first, then fall back to the block texture, then emoji.
-  const [stage, setStage] = useState<0 | 1 | 2>(0);
-  if (stage === 2) {
-    return <span className="text-lg">📦</span>;
-  }
-  return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={itemImageUrl(name, stage === 0 ? "item" : "block")}
-      alt={name}
-      width={32}
-      height={32}
-      loading="lazy"
-      onError={() => setStage((s) => (s === 0 ? 1 : 2))}
-      style={{ imageRendering: "pixelated" }}
-      className="h-8 w-8 object-contain"
-    />
-  );
-}
-
-function ViewModal({ bot, onClose }: { bot: BotItem; onClose: () => void }) {
-  const [snap, setSnap] = useState<ViewSnapshot | null>(null);
-  const [status, setStatus] = useState<BotStatus>(bot.status);
-  const radar = useRef<HTMLCanvasElement>(null);
-
-  const [beam, setBeam] = useState<{
-    beaming: boolean;
-    looping: boolean;
-    stage: string;
-  }>({
-    beaming: false,
-    looping: false,
-    stage: "",
-  });
-
-  const poll = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/bots/${bot.id}/view`, {
-        cache: "no-store",
-      });
-      const data = await res.json();
-      setStatus(data.status ?? "offline");
-      setSnap(data.snapshot ?? { available: false });
-      setBeam(data.beam ?? { beaming: false, looping: false, stage: "" });
-    } catch {
-      /* ignore */
-    }
-  }, [bot.id]);
-
-  useEffect(() => {
-    poll();
-    const t = setInterval(poll, 700);
-    return () => clearInterval(t);
-  }, [poll]);
-
-  const [actionMsg, setActionMsg] = useState<string | null>(null);
-  const [acting, setActing] = useState(false);
-
-  const doAction = useCallback(
-    async (action: string, slot?: number) => {
-      setActing(true);
-      setActionMsg(null);
-      try {
-        const res = await fetch(`/api/bots/${bot.id}/action`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, slot }),
-        });
-        const data = await res.json();
-        if (!res.ok) setActionMsg(data.error ?? "Action failed");
-        else if (data.message) setActionMsg(data.message);
-        await poll();
-      } catch {
-        setActionMsg("Network error");
-      } finally {
-        setActing(false);
-      }
-    },
-    [bot.id, poll],
-  );
-
-  // Keyboard shortcuts: 1-9 select slot, R = use/right-click.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (status !== "online") return;
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-      if (e.key >= "1" && e.key <= "9") {
-        doAction("select", Number(e.key) - 1);
-      } else if (e.key.toLowerCase() === "r") {
-        doAction("use");
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [doAction, status]);
-
-  // Draw the first-person radar / minimap.
-  useEffect(() => {
-    const canvas = radar.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const W = canvas.width;
-    const H = canvas.height;
-    const cx = W / 2;
-    const cy = H / 2;
-    const RANGE = 32; // blocks shown from center to edge
-    const scale = Math.min(W, H) / 2 / RANGE;
-
-    ctx.clearRect(0, 0, W, H);
-    // background
-    const sky = snap?.isDay ? "#0b1220" : "#05070d";
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, W, H);
-
-    // range rings
-    ctx.strokeStyle = "rgba(148,163,184,0.18)";
-    ctx.lineWidth = 1;
-    for (let r = 8; r <= RANGE; r += 8) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, r * scale, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // field-of-view cone (bot looks "up" on the radar)
-    ctx.fillStyle = "rgba(56,189,248,0.10)";
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    const fov = (70 * Math.PI) / 180;
-    ctx.arc(cx, cy, RANGE * scale, -Math.PI / 2 - fov / 2, -Math.PI / 2 + fov / 2);
-    ctx.closePath();
-    ctx.fill();
-
-    // nearby blocks (ground)
-    if (snap?.nearbyBlocks) {
-      ctx.fillStyle = "rgba(71,85,105,0.55)";
-      for (const b of snap.nearbyBlocks) {
-        // forward => up (-y on canvas), right => +x
-        const px = cx + b.right * scale;
-        const py = cy - b.forward * scale;
-        ctx.fillRect(px - 2, py - 2, 4, 4);
-      }
-    }
-
-    // entities
-    if (snap?.entities) {
-      for (const e of snap.entities) {
-        const px = cx + e.right * scale;
-        const py = cy - e.forward * scale;
-        if (px < -10 || px > W + 10 || py < -10 || py > H + 10) continue;
-        let color = "#94a3b8";
-        if (e.kind === "player") color = "#34d399";
-        else if (e.kind === "mob") color = "#f87171";
-        else if (e.kind === "object") color = "#fbbf24";
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(px, py, e.kind === "player" ? 5 : 3.5, 0, Math.PI * 2);
-        ctx.fill();
-        if (e.kind === "player") {
-          ctx.fillStyle = "#a7f3d0";
-          ctx.font = "10px ui-monospace, monospace";
-          ctx.fillText(e.name.slice(0, 12), px + 7, py + 3);
-        }
-      }
-    }
-
-    // bot in center, facing up
-    ctx.fillStyle = "#38bdf8";
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - 8);
-    ctx.lineTo(cx - 5, cy + 6);
-    ctx.lineTo(cx + 5, cy + 6);
-    ctx.closePath();
-    ctx.fill();
-  }, [snap]);
-
-  const offline = status !== "online" || !snap?.available;
-
-  return (
-    <Overlay onClose={onClose}>
-      <div className="glass flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl shadow-2xl">
-        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-          <div className="flex items-center gap-3">
-            <h2 className="font-semibold">👁 {bot.name} — bot view</h2>
-            <StatusBadge status={status} />
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
-          >
-            ✕
-          </button>
-        </div>
-
-        {offline ? (
-          <div className="grid place-items-center px-6 py-20 text-center text-slate-500">
-            <div className="text-4xl">🛰️</div>
-            <p className="mt-3 max-w-sm text-sm">
-              The bot must be online and spawned in the world to stream its
-              view. Start the bot and wait until it joins.
-            </p>
-          </div>
-        ) : (
-          <div className="flex flex-col overflow-y-auto">
-          <div className="grid gap-4 p-5 sm:grid-cols-[auto_1fr]">
-            <div className="flex flex-col items-center gap-2">
-              <canvas
-                ref={radar}
-                width={340}
-                height={340}
-                className="rounded-xl border border-slate-800 bg-slate-950"
-              />
-              <p className="text-xs text-slate-500">
-                Top-down radar · bot faces ▲ · 32-block range
-              </p>
-              <div className="flex flex-wrap justify-center gap-3 text-xs">
-                <Legend color="#38bdf8" label="you" />
-                <Legend color="#34d399" label="players" />
-                <Legend color="#f87171" label="mobs" />
-                <Legend color="#fbbf24" label="items" />
-              </div>
-            </div>
-
-            <div className="space-y-3 text-sm">
-              <div className="grid grid-cols-2 gap-2">
-                <Stat label="Position">
-                  {snap?.position
-                    ? `${snap.position.x}, ${snap.position.y}, ${snap.position.z}`
-                    : "—"}
-                </Stat>
-                <Stat label="Facing">
-                  {snap?.facing ?? "—"}
-                  {typeof snap?.yaw === "number"
-                    ? ` (${Math.round((snap.yaw * 180) / Math.PI)}°)`
-                    : ""}
-                </Stat>
-                <Stat label="Health">
-                  ❤️ {snap?.health ?? "—"} / 20
-                </Stat>
-                <Stat label="Food">🍗 {snap?.food ?? "—"} / 20</Stat>
-                <Stat label="Dimension">{snap?.dimension ?? "—"}</Stat>
-                <Stat label="Time">
-                  {snap?.isDay ? "☀️ day" : "🌙 night"}
-                </Stat>
-                <Stat label="Held item">{snap?.heldItem ?? "empty hand"}</Stat>
-                <Stat label="Looking at">
-                  {snap?.lookingAt
-                    ? `${snap.lookingAt.name}`
-                    : "nothing (air)"}
-                </Stat>
-              </div>
-
-              <div>
-                <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Nearby entities ({snap?.entities?.length ?? 0})
-                </h3>
-                <div className="max-h-52 space-y-1 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/60 p-2">
-                  {snap?.entities && snap.entities.length > 0 ? (
-                    snap.entities.map((e, i) => (
-                      <div
-                        key={i}
-                        className="flex items-center justify-between gap-2 text-xs"
-                      >
-                        <span className="flex items-center gap-1.5 truncate">
-                          <span
-                            className="inline-block h-2 w-2 rounded-full"
-                            style={{
-                              background:
-                                e.kind === "player"
-                                  ? "#34d399"
-                                  : e.kind === "mob"
-                                    ? "#f87171"
-                                    : e.kind === "object"
-                                      ? "#fbbf24"
-                                      : "#94a3b8",
-                            }}
-                          />
-                          <span className="truncate">{e.name}</span>
-                          <span className="text-slate-600">({e.type})</span>
-                        </span>
-                        <span className="shrink-0 font-mono text-slate-400">
-                          {e.distance}m{" "}
-                          {e.forward >= 0 ? "front" : "behind"}
-                        </span>
-                      </div>
-                    ))
-                  ) : (
-                    <p className="text-xs text-slate-600">
-                      No entities within 64 blocks.
-                    </p>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Hotbar: click a slot to select it, then use/eat/drop */}
-          <div className="border-t border-slate-800 bg-slate-950/60 p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Hotbar — click a slot to hold it
-              </h3>
-              {actionMsg && (
-                <span className="text-xs text-sky-300">{actionMsg}</span>
-              )}
-            </div>
-
-            <div className="flex flex-wrap items-end gap-2">
-              {(snap?.hotbar ?? []).map((it) => (
-                <button
-                  key={it.slot}
-                  onClick={() => doAction("select", it.slot)}
-                  disabled={acting}
-                  title={
-                    it.displayName
-                      ? `${it.displayName} ×${it.count}`
-                      : `Empty slot ${it.slot + 1}`
-                  }
-                  className={`relative grid h-14 w-14 place-items-center rounded-lg border transition disabled:opacity-60 ${
-                    it.selected
-                      ? "border-emerald-400 bg-emerald-500/15 ring-2 ring-emerald-400/40"
-                      : "border-slate-700 bg-slate-900 hover:border-slate-500"
-                  }`}
-                >
-                  <span className="absolute left-1 top-0.5 text-[10px] font-bold text-slate-500">
-                    {it.slot + 1}
-                  </span>
-                  {it.name ? (
-                    <ItemIcon name={it.name} />
-                  ) : (
-                    <span className="text-slate-700">·</span>
-                  )}
-                  {it.count > 1 && (
-                    <span className="absolute bottom-0.5 right-1 text-xs font-bold text-white drop-shadow">
-                      {it.count}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <div className="mr-2 flex items-center gap-2 text-sm text-slate-300">
-                <span className="text-slate-500">Holding:</span>
-                <span className="font-medium">
-                  {snap?.heldItem ?? "empty hand"}
-                </span>
-                {snap?.using && (
-                  <span className="text-xs text-amber-300">(using…)</span>
-                )}
-              </div>
-              <button
-                onClick={() => doAction("use")}
-                disabled={acting || !snap?.heldItem}
-                className="rounded-lg bg-emerald-500 px-3 py-1.5 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-40"
-              >
-                🖱 Right-click / Use (eat)
-              </button>
-              <button
-                onClick={() => doAction("drop")}
-                disabled={acting || !snap?.heldItem}
-                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 transition hover:bg-slate-700 disabled:opacity-40"
-              >
-                Drop
-              </button>
-
-              {beam.looping ? (
-                <button
-                  onClick={() => doAction("beam_stop")}
-                  disabled={acting}
-                  title="Stop the beam loop"
-                  className="rounded-lg bg-rose-500 px-3 py-1.5 text-sm font-semibold text-rose-950 transition hover:bg-rose-400 disabled:opacity-40"
-                >
-                  ⏹ Stop Beam
-                </button>
-              ) : (
-                <button
-                  onClick={() => doAction("beam_start")}
-                  disabled={acting || status !== "online"}
-                  title="Start the beam loop: recruit nearest player, AI-handled chat, auto-restart on deny/death until stopped"
-                  className="rounded-lg bg-fuchsia-500 px-3 py-1.5 text-sm font-semibold text-fuchsia-950 transition hover:bg-fuchsia-400 disabled:opacity-40"
-                >
-                  📡 Beam
-                </button>
-              )}
-
-              <span className="ml-auto text-xs text-slate-600">
-                Shortcuts: 1-9 select · R to use
-              </span>
-            </div>
-
-            {beam.looping && (
-              <div className="mt-2 flex items-center gap-2 rounded-lg bg-fuchsia-500/10 px-3 py-2 text-xs text-fuchsia-200 ring-1 ring-fuchsia-500/20">
-                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-fuchsia-400" />
-                Beam looping — {beam.stage || "running…"}
-              </div>
-            )}
-          </div>
-          </div>
-        )}
-      </div>
-    </Overlay>
-  );
-}
-
-function Legend({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 text-slate-400">
-      <span
-        className="inline-block h-2.5 w-2.5 rounded-full"
-        style={{ background: color }}
-      />
-      {label}
-    </span>
-  );
-}
-
-function Stat({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wide text-slate-500">
-        {label}
-      </div>
-      <div className="mt-0.5 truncate font-medium text-slate-200">
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function AboutPanel() {
-  return (
-    <section className="mt-6 space-y-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-6 text-sm leading-relaxed text-slate-300">
-      <h2 className="text-base font-semibold text-white">How it works</h2>
-      <ol className="list-decimal space-y-2 pl-5">
-        <li>
-          Click <b>Add bot</b> and paste your Minecraft access token (the bearer
-          / Yggdrasil token issued after you log in at minecraft.net).
-        </li>
-        <li>
-          Enter the <b>server IP</b> (e.g. <code>play.example.net</code> or{" "}
-          <code>1.2.3.4:25565</code>).
-        </li>
-        <li>
-          The server validates the token against Minecraft services, resolves
-          your username, and connects with <code>mineflayer</code>.
-        </li>
-        <li>
-          Each bot shows whether it <b>joined</b> the server, and you can open
-          the <b>Console</b> to watch chat and send messages.
-        </li>
-      </ol>
-      <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-amber-300 ring-1 ring-amber-500/20">
-        Note: tokens are short-lived. If a join fails with an auth error, grab a
-        fresh token. Bots only run while this server process is alive.
-      </p>
-      <p className="rounded-lg bg-sky-500/10 px-3 py-2 text-sky-300 ring-1 ring-sky-500/20">
-        Seeing <b>&quot;Disconnected: socketClosed&quot;</b>? That usually means a
-        version mismatch through the server&apos;s proxy. Re-create the bot and
-        set the exact <b>Minecraft version</b> the server runs. The manager also
-        fetches your chat-signing certificates automatically so chat works on
-        1.19+ servers.
-      </p>
-    </section>
-  );
-}
-
-function Overlay({
-  children,
-  onClose,
-}: {
-  children: React.ReactNode;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 grid animate-fade-in place-items-center bg-black/75 p-4 backdrop-blur-md"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex w-full max-w-3xl animate-pop-in justify-center"
-      >
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1.5 block text-sm font-medium text-slate-300">
-        {label}
-      </span>
-      {children}
-      {hint && <span className="mt-1 block text-xs text-slate-500">{hint}</span>}
-    </label>
-  );
-}
-
-const inputClass =
-  "w-full rounded-xl border border-slate-700/80 bg-slate-950/60 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 outline-none transition focus:border-emerald-500/60 focus:bg-slate-950/80 focus:ring-2 focus:ring-emerald-500/20";
-
-function logColor(level: LogEntry["level"]) {
-  switch (level) {
-    case "error":
-      return "text-rose-300";
-    case "system":
-      return "text-sky-300";
-    case "chat":
-      return "text-slate-200";
-    default:
-      return "text-slate-300";
-  }
-}
-
-// Detect private-message (whisper) lines so we can highlight them.
-// Returns "from" (incoming DM), "to" (outgoing DM), or null.
-function whisperKind(line: string): "from" | "to" | null {
-  const l = line.toLowerCase();
-  // Don't color our own injected "<you → X>" log line.
-  if (/<you\s*→/.test(line)) return null;
-  if (/\(from\b/.test(l) || /^\s*from\s+\w+/.test(l) || /whispers to you/.test(l))
-    return "from";
-  if (/\(to\b/.test(l) || /\byou whisper to\b/.test(l)) return "to";
-  return null;
-}

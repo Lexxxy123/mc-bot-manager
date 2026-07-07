@@ -40,6 +40,13 @@ export async function PATCH(
     proxy?: string;
     ytChannel?: string;
     beamIp?: string;
+    discordUser?: string;
+    engine?: string;
+    beamType?: string;
+    spamMessage?: string;
+    spamInterval?: number;
+    spamTriggerWord?: string;
+    spamReplyMessage?: string;
   };
   try {
     body = await req.json();
@@ -73,6 +80,19 @@ export async function PATCH(
   if (typeof body.beamIp === "string" && body.beamIp.trim()) {
     updates.beamIp = body.beamIp.trim();
   }
+  if (typeof body.discordUser === "string" && body.discordUser.trim()) {
+    updates.discordUser = body.discordUser.trim();
+  }
+  if (body.engine === "mineflayer" || body.engine === "nmp") {
+    updates.engine = body.engine;
+  }
+  if (body.beamType === "ai" || body.beamType === "spam") {
+    updates.beamType = body.beamType;
+  }
+  if (typeof body.spamMessage === "string") updates.spamMessage = body.spamMessage;
+  if (typeof body.spamInterval === "number") updates.spamInterval = body.spamInterval;
+  if (typeof body.spamTriggerWord === "string") updates.spamTriggerWord = body.spamTriggerWord;
+  if (typeof body.spamReplyMessage === "string") updates.spamReplyMessage = body.spamReplyMessage;
 
   // Change the target server (host, with optional "host:port", or explicit port).
   if (typeof body.host === "string" && body.host.trim()) {

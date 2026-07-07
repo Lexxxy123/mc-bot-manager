@@ -52,6 +52,7 @@ type BotRuntime = {
   beamStage: string;
   beamLoop: boolean;
   humanizer: ReturnType<typeof setTimeout> | null;
+  nmpPlayers: Set<string>;
 };
 
 const MAX_LOGS = 300;
@@ -80,6 +81,7 @@ function getOrCreateRuntime(id: string): BotRuntime {
       beamStage: "",
       beamLoop: false,
       humanizer: null,
+      nmpPlayers: new Set<string>(),
     };
     runtimes.set(id, rt);
   }
@@ -309,6 +311,253 @@ export function getLogs(id: string): LogEntry[] {
   return rt ? rt.logs : [];
 }
 
+async function startRawNmpBot(record: Bot, rt: BotRuntime) {
+  let mc: typeof import("minecraft-protocol");
+  try {
+    mc = await import("minecraft-protocol");
+  } catch (err) {
+    const msg = "Failed to load minecraft-protocol: " + String(err);
+    rt.status = "error";
+    rt.lastError = msg;
+    log(rt, "error", msg);
+    await setDbStatus(record.id, "error", msg);
+    return;
+  }
+
+  const usePinnedVersion = record.version && record.version !== "auto" ? record.version : false;
+
+  let profile: MinecraftProfile;
+  try {
+    log(rt, "system", "Validating Minecraft token...");
+    profile = await resolveProfile(record.token);
+    log(rt, "system", `Authenticated as ${profile.name} (${profile.id}).`);
+    await db.update(bots).set({ username: profile.name, uuid: profile.id }).where(eq(bots.id, record.id));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    rt.status = "error";
+    rt.lastError = msg;
+    log(rt, "error", msg);
+    await setDbStatus(record.id, "error", msg);
+    return;
+  }
+
+  // Pre-fetch chat-signing certificates for NMP mode too.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let profileKeys: any = null;
+  try {
+    profileKeys = await fetchProfileKeys(record.token);
+    log(rt, "system", "Fetched chat-signing certificates.");
+  } catch {
+    log(rt, "system", "Could not fetch chat certificates (continuing without chat signing).");
+  }
+
+  try {
+    const client = mc.createClient({
+      host: record.host,
+      port: record.port,
+      version: usePinnedVersion,
+      username: profile.name,
+      keepAlive: true,
+      checkTimeoutInterval: 600000, // 10 min
+      hideErrors: true,
+      auth: function (this: any, _client: any, options: any) {
+        const session = {
+          accessToken: record.token,
+          clientToken: crypto.randomUUID(),
+          selectedProfile: { name: profile.name, id: profile.id },
+        };
+        _client.session = session;
+        _client.username = profile.name;
+        options.accessToken = record.token;
+        options.haveCredentials = true;
+        if (profileKeys) _client.profileKeys = profileKeys;
+        _client.emit("session", session);
+        options.connect(_client);
+      },
+    } as any);
+
+    rt.bot = client;
+
+    client.on("connect", () => log(rt, "system", "TCP connected."));
+    client.on("session", () => log(rt, "system", "Session confirmed."));
+
+    client.on("login", () => {
+      rt.status = "online";
+      rt.joined = true;
+      rt.lastError = null;
+      log(rt, "system", `✅ Logged in as ${profile.name} (Raw NMP Mode).`);
+      void setDbStatus(record.id, "online");
+
+      // Their Anti-AFK & settings bypass snippet
+      try {
+        client.write("settings", { locale: "en_US", viewDistance: 8, chatMode: 0, chatColors: true, skinParts: 0x7f, mainHand: 1, enableTextFiltering: false, allowServerListings: true });
+      } catch {}
+
+      let lastAction = 0;
+      const actions = [
+        () => { try { client.write("entity_action", { entityId: 0, actionId: 0, jumpBoost: 0 }); setTimeout(() => { try { client.write("entity_action", { entityId: 0, actionId: 1, jumpBoost: 0 }); } catch {} }, 300); } catch {} }, // sneak
+        () => { try { client.write("entity_action", { entityId: 0, actionId: 4, jumpBoost: 0 }); setTimeout(() => { try { client.write("entity_action", { entityId: 0, actionId: 5, jumpBoost: 0 }); } catch {} }, 200); } catch {} }, // start/stop jumping
+        () => { try { client.write("entity_action", { entityId: 0, actionId: 2, jumpBoost: 0 }); setTimeout(() => { try { client.write("entity_action", { entityId: 0, actionId: 3, jumpBoost: 0 }); } catch {} }, 350); } catch {} }, // leave bed
+        () => { try { client.write("position", { x: 0, y: -1, z: 0, onGround: true }); } catch {} }, // position
+      ];
+
+      const antiAfk = setInterval(() => {
+        try {
+          if (rt.status !== "online") { clearInterval(antiAfk); return; }
+          const action = actions[lastAction % actions.length];
+          action();
+          lastAction++;
+        } catch { clearInterval(antiAfk); }
+      }, 15000 + Math.random() * 15000); // 15-30s random interval
+    });
+
+    // The user's exact chat parsing snippet for NMP
+    client.on("playerChat", (data: any) => {
+      let sender = ""; 
+      if (typeof data.senderName === "string") sender = data.senderName; 
+      else if (typeof data.sender === "string") sender = data.sender; 
+      sender = sender || "Unknown";
+      
+      if (sender && sender !== "Unknown" && isValidUsername(sender)) {
+        rt.nmpPlayers.add(sender);
+      }
+
+      let content = data.plainMessage || data.unsignedChat || "";
+      if (!content && data.formattedMessage) { 
+        try { content = extractText(JSON.parse(data.formattedMessage)); } 
+        catch { content = String(data.formattedMessage); } 
+      }
+      if (sender === profile.name && content) return;
+      if (content) {
+        log(rt, "chat", `<${sender}> ${content}`);
+        client.emit("messagestr", `<${sender}> ${content}`);
+      }
+    });
+
+    client.on("systemChat", (data: any) => {
+      let text = ""; 
+      try { text = extractText(JSON.parse(data.formattedMessage || data.content)); } 
+      catch { text = data.formattedMessage || data.content; }
+      if (!text) return;
+      
+      const pmSent = text.match(/^(You|you)\s*[→>]\s*(\S+)\s*[:：]\s*(.+)$/) || text.match(/^You whisper to (\S+): (.+)$/i);
+      const pmRecv = text.match(/^(\S+)\s*[→>]\s*(You|you)\s*[:：]\s*(.+)$/) || text.match(/^(\S+) whispers? (?:to you)?: (.+)$/i) || text.match(/^From (\S+): (.+)$/i);
+      
+      if (pmRecv && pmRecv[1] && isValidUsername(pmRecv[1])) {
+        rt.nmpPlayers.add(pmRecv[1]);
+      }
+
+      if (pmSent) {
+        const out = `<you → ${pmSent[2]}> ${pmSent[3]}`;
+        log(rt, "chat", out);
+        client.emit("messagestr", out);
+      } else if (pmRecv) {
+        const out = `(From ${pmRecv[1]}) ${pmRecv[2]}`;
+        log(rt, "chat", out);
+        client.emit("messagestr", out);
+      } else {
+        log(rt, "chat", `${text}`);
+        client.emit("messagestr", text);
+      }
+    });
+
+    client.on("chat", (packet: any) => {
+      const raw = typeof packet.message === "string" ? packet.message : JSON.stringify(packet.message);
+      let text = ""; 
+      try { text = extractText(JSON.parse(raw)); } 
+      catch { text = raw; }
+      if (!text) return;
+      
+      const chatMatch = text.match(/^<(.+?)>\s?(.*)$/);
+      if (chatMatch) { 
+        if (chatMatch[1] && isValidUsername(chatMatch[1])) {
+          rt.nmpPlayers.add(chatMatch[1]);
+        }
+        if (chatMatch[1] === profile.name) return; 
+        const out = `<${chatMatch[1]}> ${chatMatch[2]}`;
+        log(rt, "chat", out); 
+        client.emit("messagestr", out);
+        return; 
+      }
+      
+      const pmSent = text.match(/^(You|you)\s*[→>]\s*(\S+)\s*[:：]\s*(.+)$/) || text.match(/^You whisper to (\S+): (.+)$/i);
+      const pmRecv = text.match(/^(\S+)\s*[→>]\s*(You|you)\s*[:：]\s*(.+)$/) || text.match(/^(\S+) whispers?: (.+)$/i) || text.match(/^From (\S+): (.+)$/i);
+      
+      if (pmRecv && pmRecv[1] && isValidUsername(pmRecv[1])) {
+        rt.nmpPlayers.add(pmRecv[1]);
+      }
+
+      if (pmSent) {
+        const out = `<you → ${pmSent[2]}> ${pmSent[3]}`;
+        log(rt, "chat", out);
+        client.emit("messagestr", out);
+      } else if (pmRecv) {
+        const out = `(From ${pmRecv[1]}) ${pmRecv[2]}`;
+        log(rt, "chat", out);
+        client.emit("messagestr", out);
+      } else {
+        log(rt, "chat", `${text}`);
+        client.emit("messagestr", text);
+      }
+    });
+    
+    // NMP Kick handling
+    client.on("kick_disconnect", (packet: any) => {
+      let t = ""; 
+      try { t = extractText(JSON.parse(typeof packet.reason === "string" ? packet.reason : JSON.stringify(packet.reason))); } 
+      catch { t = String(packet.reason); }
+      rt.joined = false;
+      rt.status = "error";
+      rt.lastError = `Kicked: ${t}`;
+      log(rt, "error", rt.lastError);
+      void setDbStatus(record.id, "error", rt.lastError);
+    });
+    
+    client.on("disconnect", (packet: any) => {
+      let t = ""; 
+      try { t = extractText(JSON.parse(typeof packet.reason === "string" ? packet.reason : JSON.stringify(packet.reason))); } 
+      catch { t = String(packet.reason); }
+      rt.joined = false;
+      rt.status = "error";
+      rt.lastError = `Disconnected: ${t}`;
+      log(rt, "error", rt.lastError);
+      void setDbStatus(record.id, "error", rt.lastError);
+    });
+
+    client.on("end", (reason: any) => {
+      rt.joined = false;
+      rt.bot = null;
+      if (rt.manualStop) {
+        rt.status = "offline";
+        log(rt, "system", "Bot stopped.");
+      } else {
+        const reasonText = typeof reason === "string" ? reason : JSON.stringify(reason);
+        rt.status = "error";
+        rt.lastError = `Disconnected: ${reasonText}`;
+        log(rt, "error", rt.lastError);
+      }
+      void setDbStatus(record.id, rt.status, rt.lastError);
+    });
+
+    client.on("error", (err: any) => {
+      const msg = err?.message || String(err);
+      if (!rt.manualStop) {
+        rt.status = "error";
+        rt.lastError = msg;
+        log(rt, "error", msg);
+        void setDbStatus(record.id, "error", msg);
+      }
+    });
+
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    rt.status = "error";
+    rt.lastError = msg;
+    log(rt, "error", msg);
+    await setDbStatus(record.id, "error", msg);
+  }
+}
+
 export async function startBot(record: Bot): Promise<void> {
   const rt = getOrCreateRuntime(record.id);
   rt.manualStop = false;
@@ -316,8 +565,12 @@ export async function startBot(record: Bot): Promise<void> {
   // Tear down any existing connection first.
   if (rt.bot) {
     try {
+      if (rt.bot.socket && typeof rt.bot.socket.destroy === "function") {
+        rt.bot.socket.destroy();
+      }
+      if (typeof rt.bot.quit === "function") rt.bot.quit();
+      else if (typeof rt.bot.end === "function") rt.bot.end("Stopped");
       rt.bot.removeAllListeners();
-      rt.bot.quit();
     } catch {
       // ignore
     }
@@ -335,6 +588,11 @@ export async function startBot(record: Bot): Promise<void> {
     `Connecting to ${record.host}:${record.port} (version: ${versionLabel}) ...`,
   );
   await setDbStatus(record.id, "connecting");
+
+  // Route to the Raw NMP bypass engine if requested
+  if (record.engine === "nmp") {
+    return startRawNmpBot(record, rt);
+  }
 
   let profile: MinecraftProfile;
   try {
@@ -452,6 +710,7 @@ export async function startBot(record: Bot): Promise<void> {
       viewDistance: "far",
       chatLengthLimit: 256,
       checkTimeoutInterval: 60 * 1000,
+      keepAlive: false, // We handle NMP keep_alive manually to spoof vanilla ping
       ...(connectFn ? { connect: connectFn } : {}),
       // Custom auth: inject the bearer token session + certificates ourselves.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -492,6 +751,26 @@ export async function startBot(record: Bot): Promise<void> {
 
     bot.once("login", () => {
       log(rt, "system", "Logged in to the server.");
+      
+      // 1. Raw NMP Vanilla Keep-Alive Spoofing
+      // Real clients take network ping time to respond to keep_alives. Mineflayer
+      // responds in 0ms by default, which is a massive red flag to anticheats.
+      // We simulate a 35ms - 85ms ping latency.
+      if (bot._client) {
+        bot._client.on("keep_alive", (packet: any) => {
+          setTimeout(() => {
+            if (bot._client?.state === "play") {
+              try {
+                bot._client.write("keep_alive", {
+                  keepAliveId: packet.keepAliveId,
+                });
+              } catch {
+                // ignore
+              }
+            }
+          }, 35 + Math.random() * 50);
+        });
+      }
     });
 
     bot.once("spawn", () => {
@@ -640,7 +919,13 @@ export async function stopBot(id: string): Promise<void> {
   if (rt.bot) {
     log(rt, "system", "Stopping bot...");
     try {
-      rt.bot.quit();
+      // Force kill the TCP socket if it's a raw NMP client.
+      if (rt.bot.socket && typeof rt.bot.socket.destroy === "function") {
+        rt.bot.socket.destroy();
+      }
+      if (typeof rt.bot.quit === "function") rt.bot.quit();
+      else if (typeof rt.bot.end === "function") rt.bot.end("Stopped");
+      rt.bot.removeAllListeners();
     } catch {
       // ignore
     }
@@ -655,7 +940,47 @@ export function sendChat(id: string, message: string): boolean {
   const rt = runtimes.get(id);
   if (!rt || !rt.bot || rt.status !== "online") return false;
   try {
-    rt.bot.chat(message);
+    // If it's a Mineflayer bot
+    if (typeof rt.bot.chat === "function") {
+      rt.bot.chat(message);
+    } else {
+      // If it's a raw NMP bot, we have to write the packet manually.
+      // Note: 1.19+ chat signing is complex in raw NMP, so this uses the legacy
+      // fallback that works on proxies/1.8 but might fail on strict 1.19+ vanilla.
+      const isCmd = message.startsWith("/");
+      try {
+        rt.bot.write("chat", { message });
+      } catch {
+        try {
+          if (isCmd) {
+            rt.bot.write("chat_command", { 
+              command: message.slice(1), 
+              timestamp: BigInt(Date.now()), 
+              salt: BigInt(0), 
+              argumentSignatures: [], 
+              signedPreview: false, 
+              messageCount: 0, 
+              acknowledged: Buffer.alloc(3), 
+              previousMessages: [] 
+            });
+          } else {
+            rt.bot.write("chat_message", { 
+              message, 
+              timestamp: BigInt(Date.now()), 
+              salt: BigInt(0), 
+              signature: Buffer.alloc(0), 
+              signedPreview: false, 
+              messageCount: 0, 
+              acknowledged: Buffer.alloc(3), 
+              previousMessages: [] 
+            });
+          }
+        } catch (e2) {
+          log(rt, "error", "Raw NMP Chat Failed (1.19+ signature required). Use Mineflayer mode.");
+          return false;
+        }
+      }
+    }
     log(rt, "chat", `<you> ${message}`);
     return true;
   } catch (err) {
@@ -704,6 +1029,10 @@ export type ViewSnapshot = {
   hotbar: HotbarItem[];
   selectedSlot: number;
   using: boolean;
+  window: {
+    title: string;
+    slots: (HotbarItem | null)[];
+  } | null;
 };
 
 function cardinal(yaw: number): string {
@@ -713,13 +1042,60 @@ function cardinal(yaw: number): string {
   return dirs[Math.round(deg / 45) % 8];
 }
 
+// Extract formatted text from Minecraft chat JSON components (for Raw NMP)
+function extractText(obj: any): string {
+  if (typeof obj === "string") return obj; 
+  if (!obj || typeof obj !== "object") return "";
+  let r = "";
+  if (typeof obj.text === "string") r += obj.text;
+  if (typeof obj.translate === "string") { 
+    if (Array.isArray(obj.with)) r += obj.with.map((w: any) => extractText(w)).join(", "); 
+    else r += obj.translate; 
+  }
+  if (Array.isArray(obj.extra)) r += obj.extra.map((e: any) => extractText(e)).join("");
+  return r;
+}
+
 export function getViewSnapshot(id: string): ViewSnapshot | null {
   const rt = runtimes.get(id);
-  if (!rt || !rt.bot || rt.status !== "online" || !rt.bot.entity) {
+  if (!rt || !rt.bot || rt.status !== "online") {
     return null;
   }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const bot: any = rt.bot;
+
+  // Raw NMP Fallback: Return a valid but empty snapshot so UI renders buttons
+  if (!bot.entity) {
+    return {
+      available: true,
+      username: bot.username ?? "bot",
+      position: { x: 0, y: 0, z: 0 },
+      yaw: 0,
+      pitch: 0,
+      facing: "N",
+      health: 20,
+      food: 20,
+      dimension: "overworld",
+      timeOfDay: 0,
+      isDay: true,
+      heldItem: null,
+      lookingAt: null,
+      entities: [],
+      nearbyBlocks: [],
+      hotbar: Array.from({ length: 9 }).map((_, i) => ({
+        slot: i,
+        name: null,
+        displayName: null,
+        count: 0,
+        selected: i === 0,
+      })),
+      selectedSlot: 0,
+      using: rt.using === true,
+      window: null,
+    };
+  }
+
   const pos = bot.entity.position;
   const yaw = bot.entity.yaw ?? 0;
   const pitch = bot.entity.pitch ?? 0;
@@ -849,6 +1225,33 @@ export function getViewSnapshot(id: string): ViewSnapshot | null {
     }
   }
 
+  let windowData = null;
+  try {
+    if (bot.currentWindow) {
+      const w = bot.currentWindow;
+      const title =
+        typeof w.title === "string" ? w.title : JSON.stringify(w.title || "");
+      const wSlots: (HotbarItem | null)[] = [];
+      for (let i = 0; i < w.slots.length; i++) {
+        const item = w.slots[i];
+        if (item) {
+          wSlots.push({
+            slot: i,
+            name: String(item.name),
+            displayName: String(item.displayName ?? item.name),
+            count: Number(item.count ?? 1),
+            selected: false,
+          });
+        } else {
+          wSlots.push(null);
+        }
+      }
+      windowData = { title, slots: wSlots };
+    }
+  } catch {
+    // ignore
+  }
+
   const timeOfDay = bot.time ? Number(bot.time.timeOfDay ?? 0) : 0;
 
   return {
@@ -874,6 +1277,7 @@ export function getViewSnapshot(id: string): ViewSnapshot | null {
     hotbar,
     selectedSlot,
     using: rt.using === true,
+    window: windowData,
   };
 }
 
@@ -893,10 +1297,16 @@ export async function selectHotbarSlot(
     return { ok: false, message: "Slot must be 0-8" };
   }
   try {
-    await rt.bot.setQuickBarSlot(slot);
-    const held = rt.bot.heldItem;
-    const label = held ? held.displayName || held.name : "empty hand";
-    log(rt, "system", `Selected hotbar slot ${slot + 1} (${label}).`);
+    if (typeof rt.bot.setQuickBarSlot === "function") {
+      await rt.bot.setQuickBarSlot(slot);
+      const held = rt.bot.heldItem;
+      const label = held ? held.displayName || held.name : "empty hand";
+      log(rt, "system", `Selected hotbar slot ${slot + 1} (${label}).`);
+    } else {
+      // Raw NMP implementation
+      rt.bot.write("held_item_slot", { slotId: slot });
+      log(rt, "system", `Selected hotbar slot ${slot + 1} (Raw NMP).`);
+    }
     return { ok: true, message: `Selected slot ${slot + 1}` };
   } catch (err) {
     return {
@@ -911,6 +1321,18 @@ export async function useHeldItem(id: string): Promise<BotActionResult> {
   if (!rt || !rt.bot || rt.status !== "online") {
     return { ok: false, message: "Bot is not online" };
   }
+
+  // Raw NMP implementation fallback
+  if (typeof rt.bot.activateItem !== "function") {
+    try {
+      rt.bot.write("use_item", { hand: 0, sequence: 0 });
+      log(rt, "system", `Right-clicked (Raw NMP).`);
+      return { ok: true, message: "Used item" };
+    } catch (err) {
+      return { ok: false, message: String(err) };
+    }
+  }
+
   const held = rt.bot.heldItem;
   if (!held) {
     return { ok: false, message: "Nothing in hand to use" };
@@ -969,6 +1391,61 @@ export async function dropHeldItem(id: string): Promise<BotActionResult> {
   }
 }
 
+export async function moveBot(id: string, dir: string): Promise<BotActionResult> {
+  const rt = runtimes.get(id);
+  if (!rt || !rt.bot || rt.status !== "online") {
+    return { ok: false, message: "Bot is not online" };
+  }
+  const bot = rt.bot;
+  try {
+    bot.setControlState(dir as any, true);
+    setTimeout(() => {
+      try {
+        bot.setControlState(dir as any, false);
+      } catch {}
+    }, 600);
+    return { ok: true, message: `Moved ${dir}` };
+  } catch (err) {
+    return { ok: false, message: String(err) };
+  }
+}
+
+export async function clickWindowSlot(id: string, slot: number): Promise<BotActionResult> {
+  const rt = runtimes.get(id);
+  if (!rt || !rt.bot || rt.status !== "online") {
+    return { ok: false, message: "Bot is not online" };
+  }
+  const bot = rt.bot;
+  try {
+    if (!bot.currentWindow) {
+      return { ok: false, message: "No window open" };
+    }
+    await bot.clickWindow(slot, 0, 0);
+    log(rt, "system", `Clicked slot ${slot} in window.`);
+    return { ok: true, message: `Clicked slot ${slot}` };
+  } catch (err) {
+    log(rt, "error", `Failed to click slot: ${err}`);
+    return { ok: false, message: String(err) };
+  }
+}
+
+export async function closeWindow(id: string): Promise<BotActionResult> {
+  const rt = runtimes.get(id);
+  if (!rt || !rt.bot || rt.status !== "online") {
+    return { ok: false, message: "Bot is not online" };
+  }
+  const bot = rt.bot;
+  try {
+    if (bot.currentWindow) {
+      bot.closeWindow(bot.currentWindow);
+      log(rt, "system", `Closed window.`);
+    }
+    return { ok: true, message: "Window closed" };
+  } catch (err) {
+    return { ok: false, message: String(err) };
+  }
+}
+
 // ----------------- BEAM: scripted recruit + conversational AI ----------------
 
 export function getBeamState(id: string): {
@@ -999,47 +1476,65 @@ function cleanName(raw: unknown): string {
 }
 
 // Find the nearest other player. Returns a VALID username or null.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function findNearestPlayer(bot: any, selfName: string): string | null {
-  try {
-    const entity = bot.nearestEntity(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (e: any) =>
-        e.type === "player" &&
-        e !== bot.entity &&
-        isValidUsername(e.username) &&
-        e.username.toLowerCase() !== selfName.toLowerCase(),
-    );
-    if (entity && isValidUsername(entity.username)) {
-      return String(entity.username);
+function findNearestPlayer(rt: BotRuntime, selfName: string): string | null {
+  const bot = rt.bot;
+  if (!bot) return null;
+
+  // Mineflayer implementation
+  if (typeof bot.nearestEntity === "function") {
+    try {
+      const entity = bot.nearestEntity(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (e: any) =>
+          e.type === "player" &&
+          e !== bot.entity &&
+          isValidUsername(e.username) &&
+          e.username.toLowerCase() !== selfName.toLowerCase(),
+      );
+      if (entity && isValidUsername(entity.username)) {
+        return String(entity.username);
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
-  }
-  // Fallback: scan the players map for the closest VALID-named player.
-  try {
-    const me = bot.entity?.position;
-    let best: string | null = null;
-    let bestDist = Infinity;
-    for (const name of Object.keys(bot.players || {})) {
-      if (!isValidUsername(name)) continue;
-      if (name.toLowerCase() === selfName.toLowerCase()) continue;
-      const p = bot.players[name];
-      const ent = p?.entity;
-      if (ent?.position && me) {
-        const d = ent.position.distanceTo(me);
-        if (d < bestDist) {
-          bestDist = d;
+    // Fallback: scan the players map for the closest VALID-named player.
+    try {
+      const me = bot.entity?.position;
+      let best: string | null = null;
+      let bestDist = Infinity;
+      for (const name of Object.keys(bot.players || {})) {
+        if (!isValidUsername(name)) continue;
+        if (name.toLowerCase() === selfName.toLowerCase()) continue;
+        const p = bot.players[name];
+        const ent = p?.entity;
+        if (ent?.position && me) {
+          const d = ent.position.distanceTo(me);
+          if (d < bestDist) {
+            bestDist = d;
+            best = name;
+          }
+        } else if (!best) {
           best = name;
         }
-      } else if (!best) {
-        best = name;
       }
+      if (best) return best;
+    } catch {
+      // ignore
     }
-    return best;
-  } catch {
-    return null;
   }
+
+  // Raw NMP implementation fallback
+  if (rt.nmpPlayers && rt.nmpPlayers.size > 0) {
+    const players = Array.from(rt.nmpPlayers).filter(
+      (n) => n.toLowerCase() !== selfName.toLowerCase() && isValidUsername(n),
+    );
+    if (players.length > 0) {
+      // Pick a random player we've seen since we don't know distances
+      return players[Math.floor(Math.random() * players.length)];
+    }
+  }
+
+  return null;
 }
 
 type BeamIntent = "positive" | "negative" | "question" | "neutral";
@@ -1092,6 +1587,7 @@ async function aiConverse(
   history: { who: "me" | "them"; text: string }[],
   latest: string,
   serverIp = "badlion-pvp.xyz",
+  discordUser = "stood014",
 ): Promise<AiTurn> {
   const key =
     process.env.POLLINATIONS_API_KEY || "sk_PpVAtAY5ACUBJJAhQm5LIG2vNutlowEb";
@@ -1111,34 +1607,33 @@ async function aiConverse(
     .map((h) => `${h.who === "me" ? "me" : "them"}: ${h.text}`)
     .join("\n");
 
+  const safeIp = serverIp.replace(/\./g, " [dot] ");
+
   const prompt =
-    `You are a real Minecraft player named ${selfName} talking to another player in chat. ` +
-    `You want them to TEAM UP with you for a 2v2 challenge that you're filming for your YouTube channel "${channel}". If you both win, you both get a rank-up. ` +
-    `IMPORTANT FACTS you know and should use naturally if asked:\n` +
-    `- the 2v2 starts really soon, in like 5-10 mins\n` +
-    `- it's for your yt channel "${channel}"\n` +
-    `- you can pick a normal minecraft gamemode/kit (sword, crystal, sumo, nodebuff, etc). if they ask what gamemode, suggest one casually or ask what theyre good at\n` +
-    `- your discord is stood014\n` +
-    `- the server ip to join is "${serverIp}" — give this if they CANT use discord, dont have discord, or just to tell them where to play\n\n` +
-    `HOW TO TALK (VERY IMPORTANT):\n` +
-    `- talk like a normal chill mc player: short, lowercase, casual, typos ok, no punctuation, no emojis\n` +
-    `- ONE thought per reply. keep it to a single short line like a real person typing fast. NEVER info-dump\n` +
-    `- DO NOT randomly mention your youtube channel name. only say the channel name "${channel}" IF they directly ask what your channel is\n` +
-    `- dont cram gamemode + discord + channel + ip all into one message. say one thing, wait for their reply, then continue\n` +
-    `- be friendly and a bit needy for help (you genuinely need a teammate) but DO NOT sound desperate, spammy or like a bot\n` +
-    `- be polite: naturally use words like "pls", "please", "thanks", "thank u", "ty", "appreciate it", "u down?" when they fit\n` +
-    `- if they say they cant use discord / dont have it, DONT give up — react naturally (like "ohh how come" or "all good") and give them the server ip "${serverIp}" instead\n` +
-    `- answer their questions directly and honestly using the facts above, but keep it brief\n\n` +
+    `You are a real Minecraft player named ${selfName} chatting with another player. ` +
+    `You're recruiting them for a video. Win = both rank up.\n\n` +
+    `CRITICAL RULES FOR REPLIES (DO NOT BREAK THESE):\n` +
+    `- EXTREMELY SHORT. Maximum 10 words per reply. ONE single thought per reply. NEVER info-dump. Don't yap.\n` +
+    `- Chill, lowercase, no punctuation, typos ok. Be persuasive but play it cool.\n` +
+    `- YOU ARE ALREADY IN-GAME CHATTING WITH THEM. Do not ask for their IGN.\n` +
+    `- NEVER mention your youtube channel name ("${channel}") UNLESS they explicitly ask "whats your channel".\n` +
+    `- DO NOT keep repeating "2v2" or "youtube". Just say "team up" or "u down". Act normal.\n` +
+    `- DO NOT give your discord (${discordUser}) unless they say yes/agree or ask for it.\n` +
+    `- IF THEY SAY they sent the discord friend request ("sent", "added", "done"), reply with something like "alright one sec please" or "checking rn"\n` +
+    `- NEVER GIVE THE SERVER IP UNLESS THEY EXPLICITLY REFUSE DISCORD. Wait for them to say "i cant use discord" before dropping the IP.\n` +
+    `- ALWAYS format the IP exactly as "${safeIp}". NEVER use a real dot or you will get banned.\n` +
+    `- IF THEY ASK "is it on this server?" or "here?", say exactly: "nope its on a public server"\n` +
+    `- IF THEY SAY "im gd", "im good", "nah", "gd", "nah im gd", THEY ARE REJECTING YOU. Output 'negative' intent.\n\n` +
     (learnings
-      ? `LEARNED GUIDELINES (follow these, they come from past successful chats):\n${learnings}\n\n`
+      ? `LEARNED GUIDELINES (follow these):\n${learnings}\n\n`
       : "") +
     `Decide the intent of their LATEST message and write your next reply.\n` +
-    `Output ONLY strict minified JSON: {"intent":"positive|negative|question|neutral","reply":"<your short casual reply>"}.\n` +
-    `intent meanings:\n` +
-    `- positive = they agree / are down to help / clearly interested in teaming\n` +
-    `- negative = they hard refuse, insult you, tell you to stop, or clearly not interested. NOTE: "i cant use discord" is NOT negative — thats a question/neutral, give them the ip instead\n` +
-    `- question = they are asking something (when, what gamemode, what channel, why, cant use discord, etc) — answer it in reply and keep them interested\n` +
-    `- neutral = off-topic, game spam, or unclear\n\n` +
+    `Output ONLY strict minified JSON: {"intent":"positive|negative|question|neutral","reply":"<your under-10-words reply>"}.\n` +
+    `INTENT MEANINGS:\n` +
+    `- positive = they agree to team up\n` +
+    `- negative = they refuse, say "im gd", "nah", insult you\n` +
+    `- question = asking when, what gamemode, what channel, this server, etc.\n` +
+    `- neutral = off-topic or unclear\n\n` +
     (convo ? `conversation so far:\n${convo}\n\n` : "") +
     `their latest message: ${latest}`;
 
@@ -1205,13 +1700,97 @@ async function aiConverse(
 // Run ONE recruit attempt against the nearest player. Returns an outcome.
 async function runBeamOnce(
   rt: BotRuntime,
-  channel: string,
-  serverIp: string,
+  record: Bot,
 ): Promise<"positive" | "negative" | "died" | "noplayer" | "stopped"> {
+  const channel = record.ytChannel;
+  const serverIp = record.beamIp;
+  const discordUser = record.discordUser;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const bot: any = rt.bot;
   const self = String(bot.username || "bot");
   const SEND_GAP = 2600;
+
+  if (record.beamType === "spam") {
+    rt.beamStage = "spamming";
+    const msg = record.spamMessage;
+    try {
+      bot.chat(msg);
+      log(rt, "chat", `<you → server> ${msg}`);
+      
+      // Also save to training DB as a "spam" log
+      try {
+        const { recordConversation } = await import("@/lib/training");
+        void recordConversation({
+          botId: rt.id,
+          target: "spam",
+          outcome: "positive",
+          transcript: [{ who: "me", text: msg }],
+        });
+      } catch {}
+    } catch {
+      // ignore
+    }
+    
+    // Now wait for the specified interval, BUT during this time listen for the trigger word.
+    const interval = Number(record.spamInterval) > 0 ? Number(record.spamInterval) : 60000;
+    const triggerWord = record.spamTriggerWord.toLowerCase();
+    const replyMsg = record.spamReplyMessage;
+
+    const onChat = (message: any) => {
+      // Basic implementation: wait for trigger word from ANY player, then /msg them the reply.
+      const raw = typeof message === "string" ? message : String(message);
+      const low = raw.toLowerCase();
+      
+      // Don't reply to self.
+      if (low.includes(`<${self.toLowerCase()}>`)) return;
+      if (low.includes(self.toLowerCase()) && low.includes("->")) return; // sent whispers
+      
+      if (low.includes(triggerWord)) {
+        // Very basic sender extraction (assumes format is `name: message` or `<name> message`)
+        let sender: string | null = null;
+        const chatMatch = raw.match(/^<([^>]+)>\s*(.*)$/);
+        const systemMatch = raw.match(/^([^:\s]+)\s*:\s*(.*)$/);
+        
+        if (chatMatch && chatMatch[1]) sender = chatMatch[1];
+        else if (systemMatch && systemMatch[1]) sender = systemMatch[1];
+
+        if (sender && sender.toLowerCase() !== self.toLowerCase() && isValidUsername(sender)) {
+          try {
+            bot.chat(`/msg ${sender} ${replyMsg}`);
+            log(rt, "chat", `<you → ${sender}> ${replyMsg}`);
+            
+            // Also log the trigger interaction
+            try {
+              import("@/lib/training").then(m => {
+                 m.recordConversation({
+                   botId: rt.id,
+                   target: sender,
+                   outcome: "positive",
+                   transcript: [
+                     { who: "them", text: raw },
+                     { who: "me", text: replyMsg }
+                   ],
+                 });
+              });
+            } catch {}
+          } catch {}
+        }
+      }
+    };
+    bot.on("messagestr", onChat);
+    
+    // Wait for the interval in chunks to allow stopping
+    const start = Date.now();
+    while (Date.now() - start < interval) {
+      if (!rt.beamLoop) {
+        bot.removeListener("messagestr", onChat);
+        return "stopped";
+      }
+      await sleep(1000);
+    }
+    bot.removeListener("messagestr", onChat);
+    return "positive"; // Loop again
+  }
 
   // 1) Hold hotbar slot 3 + right-click.
   rt.beamStage = "equipping (slot 3 + right click)";
@@ -1418,29 +1997,54 @@ async function runBeamOnce(
       }
     };
 
-    // After they agree: send a short opener about gamemode, then JUST KEEP
-    // CHATTING with them — no auto-leave on silence. We only leave if they
-    // hard-refuse. We patiently wait for their replies (humans take time).
+    // After they agree: ask for gamemode -> wait for answer -> drop discord -> wait for them to leave.
     const runClosing = async (): Promise<
       "positive" | "died" | "stopped"
     > => {
-      rt.beamStage = "positive → chatting";
-      log(rt, "system", "🔆 Beam: positive! They're in — keeping the convo going.");
-      // One short, human line. (Not an info-dump.)
+      rt.beamStage = "positive → asking gamemode";
+      log(rt, "system", "🔆 Beam: positive! Asking for gamemode.");
+      
       await whisper("ayy lets go, what gamemode u good at?");
       if (died) return "died";
       if (!rt.beamLoop) return "stopped";
 
-      const MAX_WAIT = 600000; // 10 min hard safety cap only
+      // Wait up to 30s for them to answer the gamemode question.
+      await gapOrReply(30000);
+      if (died) return "died";
+      if (!rt.beamLoop) return "stopped";
+
+      // Consume their reply if they sent one.
+      if (inbox.length > consumed) {
+        const r = inbox.slice(consumed).join(" ");
+        consumed = inbox.length;
+        history.push({ who: "them", text: r });
+        log(rt, "system", `🔆 Beam: ${target} answered gamemode: "${r.slice(0, 60)}"`);
+      }
+
+      // Now hardcode the Discord drop so the AI doesn't get stuck chatting forever.
+      rt.beamStage = "dropping discord";
+      await whisper(`could u add my discord ${discordUser} pls, its starting soon`);
+      if (died) return "died";
+      if (!rt.beamLoop) return "stopped";
+      await whisper("then ill send the ip so u can hop on");
+      await whisper("thanks man");
+      log(rt, "system", "🔆 Beam: closing script sent.");
+
+      let gaveIp = false;
+      const safeIp = serverIp.replace(/\./g, " [dot] ");
+
+      // Now wait for them to leave the server (meaning they went to add discord).
+      rt.beamStage = `waiting for ${target} to leave…`;
+      const MAX_WAIT = 300000; // 5 min safety cap
       const startedAt = Date.now();
+      
       while (rt.beamLoop && !died && !targetLeft) {
         if (Date.now() - startedAt > MAX_WAIT) break;
-        // Wait patiently for their reply — NO leave on silence here.
-        await gapOrReply(60000);
+        await gapOrReply(15000);
         if (died) return "died";
         if (!rt.beamLoop) return "stopped";
         if (targetLeft) break;
-        if (inbox.length <= consumed) continue; // still no reply → keep waiting
+        if (inbox.length <= consumed) continue; // silence → keep waiting
 
         const r = inbox.slice(consumed).join(" ");
         consumed = inbox.length;
@@ -1448,23 +2052,57 @@ async function runBeamOnce(
         log(rt, "system", `🔆 Beam: ${target} said "${r.slice(0, 60)}"`);
 
         const lr = r.toLowerCase();
-        const hardNo =
-          /\b(no thanks|nty|nvm|never ?mind|not interested|stop|go away|leave me|fuck off|piss off)\b/.test(
-            lr,
-          );
+        
+        // Did they reject us after the discord drop?
+        const hardNo = /\b(no thanks|nty|nvm|never ?mind|not interested|stop|go away|leave me|fuck off|piss off)\b/.test(lr);
         if (hardNo) {
           doLeave("they declined");
           break;
         }
 
-        // Let the AI carry the conversation naturally (split into human msgs).
-        const ai2 = await aiConverse(channel, self, history, r, serverIp);
+        // Did they say they sent the request?
+        const sent = /\b(sent|added|added you|add(ed)? u|joined|joining|im in|i'?m in|ready|added ya|friended|on it|coming)\b/.test(lr);
+        if (sent) {
+          // Send to AI so it replies naturally (e.g. "alright one sec please").
+          const aiSent = await aiConverse(channel, self, history, r, safeIp, discordUser);
+          if (aiSent.reply) {
+            await whisperHuman(aiSent.reply);
+          } else {
+            await whisper("alright one sec please");
+          }
+          continue; // keep waiting for them to leave
+        }
+
+        // Do they not have Discord? Give the IP.
+        const noDiscord = /\b(idh|i ?don'?t have|no discord|dont have discord|cant use discord|can'?t use discord|cannot use discord|no dc|dont use discord)\b/.test(lr);
+        if (noDiscord && !gaveIp) {
+          gaveIp = true;
+          const ai2 = await aiConverse(channel, self, history, r, safeIp, discordUser);
+          if (ai2.reply) {
+            await whisperHuman(ai2.reply);
+          } else {
+            await whisper(`ohh all good, just hop on ${safeIp} then`);
+          }
+          if (!ai2.reply || !ai2.reply.toLowerCase().includes(safeIp.toLowerCase().replace(/\[dot\]/g, ""))) {
+            await whisper(`ip is ${safeIp}, hop on when ur free`);
+          }
+          log(rt, "system", "🔆 Beam: gave IP. Waiting 10s for final reply...");
+          await gapOrReply(10000);
+          doLeave("gave IP, leaving");
+          break;
+        }
+
+        // Otherwise, let AI handle any random questions while we wait for them to leave.
+        const ai2 = await aiConverse(channel, self, history, r, safeIp, discordUser);
         if (ai2.intent === "negative") {
           doLeave("they declined");
           break;
         }
-        if (ai2.reply) await whisperHuman(ai2.reply);
+        if (ai2.reply) {
+          await whisperHuman(ai2.reply);
+        }
       }
+
       log(
         rt,
         "system",
@@ -1485,7 +2123,7 @@ async function runBeamOnce(
       history.push({ who: "them", text: reply });
       log(rt, "system", `🔆 Beam: ${target} said "${reply.slice(0, 60)}"`);
 
-      const ai = await aiConverse(channel, self, history, reply, serverIp);
+      const ai = await aiConverse(channel, self, history, reply, serverIp, discordUser);
       log(rt, "system", `🔆 Beam: intent=${ai.intent.toUpperCase()}.`);
 
       if (ai.intent === "negative") {
@@ -1601,24 +2239,25 @@ export async function startBeam(id: string): Promise<BotActionResult> {
 
   // Read the YT channel + beam IP from the DB record.
   let channel = "Alight.z";
-  let serverIp = "badlion-pvp.xyz";
+  let record: Bot | null = null;
   try {
     const [rec] = await db.select().from(bots).where(eq(bots.id, id));
-    if (rec?.ytChannel) channel = rec.ytChannel;
-    if (rec?.beamIp) serverIp = rec.beamIp;
+    if (rec) record = rec;
   } catch {
     // ignore, use default
   }
 
+  if (!record) return { ok: false, message: "Bot record not found" };
+
   rt.beamLoop = true;
   rt.beaming = true;
   rt.beamStage = "starting";
-  log(rt, "system", `🔆 Beam loop started (channel: ${channel}).`);
+  log(rt, "system", `🔆 Beam loop started (type: ${record.beamType}).`);
 
   (async () => {
     try {
       while (rt.beamLoop && rt.bot && rt.status === "online") {
-        const outcome = await runBeamOnce(rt, channel, serverIp);
+        const outcome = await runBeamOnce(rt, record);
         if (!rt.beamLoop) break;
         if (outcome === "stopped") break;
         if (outcome === "positive") {

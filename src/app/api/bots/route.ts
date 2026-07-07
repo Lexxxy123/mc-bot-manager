@@ -34,6 +34,13 @@ export async function GET() {
       proxy: b.proxy,
       ytChannel: b.ytChannel,
       beamIp: b.beamIp,
+      discordUser: b.discordUser,
+      engine: b.engine,
+      beamType: b.beamType,
+      spamMessage: b.spamMessage,
+      spamInterval: b.spamInterval,
+      spamTriggerWord: b.spamTriggerWord,
+      spamReplyMessage: b.spamReplyMessage,
       status: rt.status,
       joined: rt.joined,
       lastError: rt.lastError ?? b.lastError,
@@ -75,6 +82,14 @@ export async function POST(req: Request) {
     version?: string;
     proxy?: string;
     ytChannel?: string;
+    beamIp?: string;
+    discordUser?: string;
+    engine?: string;
+    beamType?: string;
+    spamMessage?: string;
+    spamInterval?: number;
+    spamTriggerWord?: string;
+    spamReplyMessage?: string;
   };
   try {
     body = await req.json();
@@ -111,6 +126,14 @@ export async function POST(req: Request) {
   const version = (body.version ?? "").trim() || "auto";
   const proxy = (body.proxy ?? "").trim();
   const ytChannel = (body.ytChannel ?? "").trim() || "Alight.z";
+  const beamIp = (body.beamIp ?? "").trim() || "badlion-pvp.xyz";
+  const discordUser = (body.discordUser ?? "").trim() || "stood014";
+  const engine = (body.engine === "nmp") ? "nmp" : "mineflayer";
+  const beamType = (body.beamType === "spam") ? "spam" : "ai";
+  const spamMessage = (body.spamMessage ?? "").trim() || "join my smp guys /msg me";
+  const spamInterval = Number.isFinite(Number(body.spamInterval)) ? Number(body.spamInterval) : 60000;
+  const spamTriggerWord = (body.spamTriggerWord ?? "").trim() || "123";
+  const spamReplyMessage = (body.spamReplyMessage ?? "").trim() || "add my discord stood014 to join";
 
   const [inserted] = await db
     .insert(bots)
@@ -123,6 +146,14 @@ export async function POST(req: Request) {
       version,
       proxy,
       ytChannel,
+      beamIp,
+      discordUser,
+      engine,
+      beamType,
+      spamMessage,
+      spamInterval,
+      spamTriggerWord,
+      spamReplyMessage,
       status: "connecting",
       enabled: "true",
     })

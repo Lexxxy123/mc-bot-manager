@@ -154,7 +154,28 @@ function parseProxy(raw: string | null | undefined): ProxyConfig | null {
 
 type MinecraftProfile = { id: string; name: string };
 
+function decodeJwtPayload(token: string): Record<string, any> | null {
+  try { 
+    const parts = token.split("."); 
+    if (parts.length < 2) return null; 
+    return JSON.parse(Buffer.from(parts[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8")); 
+  } catch { 
+    return null; 
+  }
+}
+
 async function resolveProfile(token: string): Promise<MinecraftProfile> {
+  // 1. Try decoding the profile directly from the token (Yggdrasil / SSID format)
+  const payload = decodeJwtPayload(token);
+  if (payload) { 
+    const pfd = payload.pfd as Array<{ type: string; id: string; name: string }> | undefined; 
+    if (pfd && Array.isArray(pfd)) { 
+      const mc = pfd.find(p => p.type === "mc"); 
+      if (mc) return { name: mc.name, id: mc.id }; 
+    } 
+  }
+
+  // 2. Fallback to Minecraft API fetch
   const res = await fetch(
     "https://api.minecraftservices.com/minecraft/profile",
     { headers: { Authorization: `Bearer ${token}` } },
@@ -377,6 +398,39 @@ async function startRawNmpBot(record: Bot, rt: BotRuntime) {
     } as any);
 
     rt.bot = client;
+    
+    client.chat = (message: string) => {
+      const isCmd = message.startsWith("/");
+      try {
+        client.write("chat", { message });
+      } catch {
+        try {
+          if (isCmd) {
+            client.write("chat_command", { 
+              command: message.slice(1), 
+              timestamp: BigInt(Date.now()), 
+              salt: BigInt(0), 
+              argumentSignatures: [], 
+              signedPreview: false, 
+              messageCount: 0, 
+              acknowledged: Buffer.alloc(3), 
+              previousMessages: [] 
+            });
+          } else {
+            client.write("chat_message", { 
+              message, 
+              timestamp: BigInt(Date.now()), 
+              salt: BigInt(0), 
+              signature: Buffer.alloc(0), 
+              signedPreview: false, 
+              messageCount: 0, 
+              acknowledged: Buffer.alloc(3), 
+              previousMessages: [] 
+            });
+          }
+        } catch {}
+      }
+    };
 
     client.on("connect", () => log(rt, "system", "TCP connected."));
     client.on("session", () => log(rt, "system", "Session confirmed."));
@@ -397,8 +451,6 @@ async function startRawNmpBot(record: Bot, rt: BotRuntime) {
       const actions = [
         () => { try { client.write("entity_action", { entityId: 0, actionId: 0, jumpBoost: 0 }); setTimeout(() => { try { client.write("entity_action", { entityId: 0, actionId: 1, jumpBoost: 0 }); } catch {} }, 300); } catch {} }, // sneak
         () => { try { client.write("entity_action", { entityId: 0, actionId: 4, jumpBoost: 0 }); setTimeout(() => { try { client.write("entity_action", { entityId: 0, actionId: 5, jumpBoost: 0 }); } catch {} }, 200); } catch {} }, // start/stop jumping
-        () => { try { client.write("entity_action", { entityId: 0, actionId: 2, jumpBoost: 0 }); setTimeout(() => { try { client.write("entity_action", { entityId: 0, actionId: 3, jumpBoost: 0 }); } catch {} }, 350); } catch {} }, // leave bed
-        () => { try { client.write("position", { x: 0, y: -1, z: 0, onGround: true }); } catch {} }, // position
       ];
 
       const antiAfk = setInterval(() => {
@@ -786,6 +838,30 @@ export async function startBot(record: Bot): Promise<void> {
       );
       void setDbStatus(record.id, "online");
 
+      // Heavily tweak Mineflayer physics: completely disable automated movement.
+      // This stops the robotic 20Hz 'position'/'position_look' packet spam that
+      // strict anticheats easily fingerprint.
+      bot.physicsEnabled = false;
+
+      // Start the identical raw NMP stealth Anti-AFK loop
+      let lastAction = 0;
+      const actions = [
+        () => { try { bot._client.write("entity_action", { entityId: 0, actionId: 0, jumpBoost: 0 }); setTimeout(() => { try { bot._client.write("entity_action", { entityId: 0, actionId: 1, jumpBoost: 0 }); } catch {} }, 300); } catch {} }, // sneak
+        () => { try { bot._client.write("entity_action", { entityId: 0, actionId: 4, jumpBoost: 0 }); setTimeout(() => { try { bot._client.write("entity_action", { entityId: 0, actionId: 5, jumpBoost: 0 }); } catch {} }, 200); } catch {} }, // start/stop jumping
+      ];
+
+      const antiAfk = setInterval(() => {
+        try {
+          if (rt.status !== "online") { clearInterval(antiAfk); return; }
+          const action = actions[lastAction % actions.length];
+          action();
+          lastAction++;
+        } catch { clearInterval(antiAfk); }
+      }, 15000 + Math.random() * 15000); // 15-30s random interval
+
+      // Clean up the loop when disconnected
+      bot.once("end", () => clearInterval(antiAfk));
+
       // Send a vanilla-style client settings packet and brand so the server
       // sees the same data a real Java client reports.
       try {
@@ -940,46 +1016,8 @@ export function sendChat(id: string, message: string): boolean {
   const rt = runtimes.get(id);
   if (!rt || !rt.bot || rt.status !== "online") return false;
   try {
-    // If it's a Mineflayer bot
     if (typeof rt.bot.chat === "function") {
       rt.bot.chat(message);
-    } else {
-      // If it's a raw NMP bot, we have to write the packet manually.
-      // Note: 1.19+ chat signing is complex in raw NMP, so this uses the legacy
-      // fallback that works on proxies/1.8 but might fail on strict 1.19+ vanilla.
-      const isCmd = message.startsWith("/");
-      try {
-        rt.bot.write("chat", { message });
-      } catch {
-        try {
-          if (isCmd) {
-            rt.bot.write("chat_command", { 
-              command: message.slice(1), 
-              timestamp: BigInt(Date.now()), 
-              salt: BigInt(0), 
-              argumentSignatures: [], 
-              signedPreview: false, 
-              messageCount: 0, 
-              acknowledged: Buffer.alloc(3), 
-              previousMessages: [] 
-            });
-          } else {
-            rt.bot.write("chat_message", { 
-              message, 
-              timestamp: BigInt(Date.now()), 
-              salt: BigInt(0), 
-              signature: Buffer.alloc(0), 
-              signedPreview: false, 
-              messageCount: 0, 
-              acknowledged: Buffer.alloc(3), 
-              previousMessages: [] 
-            });
-          }
-        } catch (e2) {
-          log(rt, "error", "Raw NMP Chat Failed (1.19+ signature required). Use Mineflayer mode.");
-          return false;
-        }
-      }
     }
     log(rt, "chat", `<you> ${message}`);
     return true;
@@ -1054,6 +1092,30 @@ function extractText(obj: any): string {
   }
   if (Array.isArray(obj.extra)) r += obj.extra.map((e: any) => extractText(e)).join("");
   return r;
+}
+
+// Robustly extracts a sender and their message from various Minecraft chat string formats.
+// Supports generic Vanilla chat, Minemen/MCPVP ranks, and direct messages.
+function extractSenderAndMessage(raw: string): { sender: string; msg: string } | null {
+  const clean = raw.replace(/\u00A7./g, "").trim();
+
+  // 1. <Player> Message
+  let m = clean.match(/^<([A-Za-z0-9_]+)>\s+(.+)$/);
+  if (m) return { sender: m[1], msg: m[2] };
+
+  // 2. [Rank] Player » Message OR Player » Message
+  m = clean.match(/(?:\]\s*)?([A-Za-z0-9_]+)\s*[»>]\s+(.+)$/);
+  if (m) return { sender: m[1], msg: m[2] };
+
+  // 3. [Rank] Player: Message OR Player: Message
+  m = clean.match(/(?:\]\s*)?([A-Za-z0-9_]+)\s*:\s+(.+)$/);
+  if (m) return { sender: m[1], msg: m[2] };
+
+  // 4. From Player: Message OR Player whispers: Message
+  m = clean.match(/^(?:From\s+)?([A-Za-z0-9_]+)\s*(?:whispers(?: to you)?:|:)\s+(.+)$/i);
+  if (m) return { sender: m[1], msg: m[2] };
+
+  return null;
 }
 
 export function getViewSnapshot(id: string): ViewSnapshot | null {
@@ -1580,7 +1642,7 @@ function parsePublicChatFrom(line: string, target: string): string | null {
   return msg;
 }
 
-// Conversational AI via Pollinations. Returns intent + an in-character reply.
+// Conversational AI via OpenRouter API. Returns intent + an in-character reply.
 async function aiConverse(
   channel: string,
   selfName: string,
@@ -1589,9 +1651,8 @@ async function aiConverse(
   serverIp = "badlion-pvp.xyz",
   discordUser = "stood014",
 ): Promise<AiTurn> {
-  const key =
-    process.env.POLLINATIONS_API_KEY || "sk_PpVAtAY5ACUBJJAhQm5LIG2vNutlowEb";
-  const model = process.env.POLLINATIONS_MODEL || "openai";
+  const openRouterKey = process.env.OPENROUTER_API_KEY || "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";
+  const model = process.env.OPENROUTER_MODEL || "poolside/laguna-xs-2.1:free";
 
   // Pull learned guidelines if AI training is enabled.
   let learnings = "";
@@ -1609,7 +1670,7 @@ async function aiConverse(
 
   const safeIp = serverIp.replace(/\./g, " [dot] ");
 
-  const prompt =
+  const systemPrompt =
     `You are a real Minecraft player named ${selfName} chatting with another player. ` +
     `You're recruiting them for a video. Win = both rank up.\n\n` +
     `CRITICAL RULES FOR REPLIES (DO NOT BREAK THESE):\n` +
@@ -1633,21 +1694,40 @@ async function aiConverse(
     `- positive = they agree to team up\n` +
     `- negative = they refuse, say "im gd", "nah", insult you\n` +
     `- question = asking when, what gamemode, what channel, this server, etc.\n` +
-    `- neutral = off-topic or unclear\n\n` +
-    (convo ? `conversation so far:\n${convo}\n\n` : "") +
-    `their latest message: ${latest}`;
+    `- neutral = off-topic or unclear\n\n`;
+
+  const userPrompt = (convo ? `conversation so far:\n${convo}\n\n` : "") + `their latest message: ${latest}`;
 
   try {
-    const url = `https://gen.pollinations.ai/text/${encodeURIComponent(
-      prompt,
-    )}?model=${encodeURIComponent(model)}&key=${encodeURIComponent(key)}`;
+    const url = "https://openrouter.ai/api/v1/chat/completions";
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 9000);
-    const res = await fetch(url, { signal: ctrl.signal });
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${openRouterKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 150,
+      }),
+      signal: ctrl.signal
+    });
     clearTimeout(timer);
     if (res.ok) {
-      const raw = (await res.text()).trim();
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      const jsonRes = await res.json();
+      const raw = jsonRes.choices?.[0]?.message?.content || "";
+      
+      // Since DeepSeek-R1 outputs thought processes in <think> tags, we need to strip them.
+      const cleanRaw = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+
+      const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
           const obj = JSON.parse(jsonMatch[0]);
@@ -1665,13 +1745,17 @@ async function aiConverse(
           // fall through
         }
       }
+      
       // No JSON — try to infer intent from text.
-      const low = raw.toLowerCase();
+      const low = cleanRaw.toLowerCase();
       if (low.includes("positive")) return { intent: "positive", reply: "" };
       if (low.includes("negative")) return { intent: "negative", reply: "" };
-      if (low.includes("question")) return { intent: "question", reply: raw };
+      if (low.includes("question")) return { intent: "question", reply: cleanRaw };
+    } else {
+      console.error("OpenRouter API Error:", res.status, await res.text());
     }
-  } catch {
+  } catch (err) {
+    console.error("OpenRouter API Exception:", err);
     // fall through to heuristic
   }
 
@@ -1746,34 +1830,30 @@ async function runBeamOnce(
       if (low.includes(self.toLowerCase()) && low.includes("->")) return; // sent whispers
       
       if (low.includes(triggerWord)) {
-        // Very basic sender extraction (assumes format is `name: message` or `<name> message`)
-        let sender: string | null = null;
-        const chatMatch = raw.match(/^<([^>]+)>\s*(.*)$/);
-        const systemMatch = raw.match(/^([^:\s]+)\s*:\s*(.*)$/);
-        
-        if (chatMatch && chatMatch[1]) sender = chatMatch[1];
-        else if (systemMatch && systemMatch[1]) sender = systemMatch[1];
-
-        if (sender && sender.toLowerCase() !== self.toLowerCase() && isValidUsername(sender)) {
-          try {
-            bot.chat(`/msg ${sender} ${replyMsg}`);
-            log(rt, "chat", `<you → ${sender}> ${replyMsg}`);
-            
-            // Also log the trigger interaction
+        const parsed = extractSenderAndMessage(raw);
+        if (parsed) {
+          const sender = parsed.sender;
+          if (sender.toLowerCase() !== self.toLowerCase() && isValidUsername(sender)) {
             try {
-              import("@/lib/training").then(m => {
-                 m.recordConversation({
-                   botId: rt.id,
-                   target: sender,
-                   outcome: "positive",
-                   transcript: [
-                     { who: "them", text: raw },
-                     { who: "me", text: replyMsg }
-                   ],
-                 });
-              });
+              bot.chat(`/msg ${sender} ${replyMsg}`);
+              log(rt, "chat", `<you → ${sender}> ${replyMsg}`);
+            
+              // Also log the trigger interaction
+              try {
+                import("@/lib/training").then(m => {
+                  m.recordConversation({
+                    botId: rt.id,
+                    target: sender,
+                    outcome: "positive",
+                    transcript: [
+                      { who: "them", text: raw },
+                      { who: "me", text: replyMsg }
+                    ],
+                  });
+                });
+              } catch {}
             } catch {}
-          } catch {}
+          }
         }
       }
     };
@@ -1792,38 +1872,31 @@ async function runBeamOnce(
     return "positive"; // Loop again
   }
 
-  // 1) Hold hotbar slot 3 + right-click.
-  rt.beamStage = "equipping (slot 3 + right click)";
-  log(rt, "system", "🔆 Beam: slot 3 + right-click.");
-  try {
-    await bot.setQuickBarSlot(2);
-  } catch {
-    // ignore
-  }
-  await sleep(300);
-  try {
-    bot.activateItem();
-    await sleep(600);
-    bot.deactivateItem();
-  } catch {
-    // ignore
-  }
-
-  if (!rt.beamLoop) return "stopped";
-
-  // 2s pause, then walk forward 2s.
-  rt.beamStage = "waiting 2s after item";
-  log(rt, "system", "🔆 Beam: waiting 2s after item use.");
-  await sleep(2000);
-  rt.beamStage = "walking forward";
-  log(rt, "system", "🔆 Beam: walking forward 2s.");
-  try {
-    bot.setControlState("forward", true);
-    await sleep(2000);
-    bot.setControlState("forward", false);
-  } catch {
+  // 1) Auto-queue for MCPVP or use hotbar right-click
+  if (record.host.toLowerCase().includes("mcpvp")) {
+    const queues = ["/queue sword", "/queue mace", "/queue axe"];
+    const q = queues[Math.floor(Math.random() * queues.length)];
+    rt.beamStage = "auto queue (MCPVP)";
     try {
-      bot.clearControlStates();
+      bot.chat(q);
+      log(rt, "chat", `<you → server> ${q}`);
+      log(rt, "system", `🔆 Beam: Sent ${q} to auto-join match.`);
+    } catch {}
+    await sleep(1500);
+  } else {
+    // Hold hotbar slot 3 + right-click.
+    rt.beamStage = "equipping (slot 3 + right click)";
+    log(rt, "system", "🔆 Beam: slot 3 + right-click.");
+    try {
+      await bot.setQuickBarSlot(2);
+    } catch {
+      // ignore
+    }
+    await sleep(300);
+    try {
+      bot.activateItem();
+      await sleep(600);
+      bot.deactivateItem();
     } catch {
       // ignore
     }
@@ -1831,8 +1904,88 @@ async function runBeamOnce(
 
   if (!rt.beamLoop) return "stopped";
 
-  // Find nearest player.
-  const target = findNearestPlayer(bot, self);
+  // Wait for the server's "Match started!" message, OR fallback to a simple timeout if it doesn't appear.
+  // This solves the issue where opponents are vanished during the "5... 4... 3..." countdown.
+  rt.beamStage = "waiting for match to start";
+  log(rt, "system", "🔆 Beam: waiting for match start...");
+  let matchStarted = false;
+  let opponentFromChat: string | null = null;
+  const matchStartListener = (msg: any) => {
+    // Strip color codes AND zero-width spaces/invisible characters
+    const txt = String(msg).replace(/[\u00A7\u200B-\u200D\uFEFF]/g, ""); 
+    const low = txt.toLowerCase();
+    if (low.includes("match started")) matchStarted = true;
+    
+    // Listen for the exact opponent name in the queue text
+    // The chat often has bullets (●) or other symbols before it.
+    const oppMatch = txt.match(/Opponent[^\w]*([A-Za-z0-9_]{3,16})/i);
+    if (oppMatch && oppMatch[1]) {
+      // Validate the extracted name
+      const potentialName = oppMatch[1].trim();
+      if (isValidUsername(potentialName) && potentialName.toLowerCase() !== self.toLowerCase()) {
+        opponentFromChat = potentialName;
+        log(rt, "system", `🔆 Beam: Chat extracted target → ${opponentFromChat}`);
+      }
+    }
+  };
+  
+  // On MCPVP, there is no "Match started!" message. Instead, the server
+  // transfers you to a duel instance, which fires a 'login' or 'respawn' packet.
+  const serverTransferListener = () => {
+    if (record.host.toLowerCase().includes("mcpvp")) {
+      matchStarted = true;
+    }
+  };
+
+  bot.on("messagestr", matchStartListener);
+  if (bot._client) bot._client.on("login", serverTransferListener);
+  
+  const waitStart = Date.now();
+  // Wait up to 15 seconds for the match to start
+  while (!matchStarted && Date.now() - waitStart < 15000 && rt.beamLoop) {
+    await sleep(500);
+  }
+  bot.removeListener("messagestr", matchStartListener);
+  if (bot._client) bot._client.removeListener("login", serverTransferListener);
+  if (!rt.beamLoop) return "stopped";
+
+  // 1s pause after match starts to let the player fully un-vanish, then walk forward
+  await sleep(1000);
+  rt.beamStage = "walking forward";
+  log(rt, "system", "🔆 Beam: walking forward 2s.");
+  try {
+    if (typeof bot.setControlState === "function") {
+      bot.setControlState("forward", true);
+      await sleep(2000);
+      bot.setControlState("forward", false);
+    } else {
+      // For Raw NMP bots, we just sleep.
+      await sleep(2000);
+    }
+  } catch {
+    try {
+      if (typeof bot.clearControlStates === "function") {
+        bot.clearControlStates();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!rt.beamLoop) return "stopped";
+
+  // Use the chat-extracted opponent if we found it! Otherwise fallback to scanning players.
+  let target = opponentFromChat || findNearestPlayer(rt, self);
+  let retries = 5;
+  while (!target && retries > 0 && rt.beamLoop) {
+    rt.beamStage = "looking for player…";
+    log(rt, "system", "🔆 Beam: looking for opponent (waiting 1s)...");
+    await sleep(1000);
+    // If opponentFromChat is still null, keep checking the game world
+    target = opponentFromChat || findNearestPlayer(rt, self);
+    retries--;
+  }
+  
   if (!target || !isValidUsername(target)) {
     rt.beamStage = "no valid player nearby";
     log(rt, "system", "🔆 Beam: no valid nearby player found.");
@@ -1930,8 +2083,22 @@ async function runBeamOnce(
 
   const whisper = async (line: string, gap = SEND_GAP) => {
     try {
-      bot.chat(`/msg ${target} ${line}`);
-      log(rt, "chat", `<you → ${target}> ${line}`);
+      if (record.host.toLowerCase().includes("mcpvp")) {
+        // On mcpvp, we are usually in isolated duel instances where public chat is safe and /msg is disabled
+        if (typeof bot.chat === "function") {
+          bot.chat(line);
+        } else if (bot.write) {
+          bot.write("chat", { message: line });
+        }
+        log(rt, "chat", `<you> ${line}`);
+      } else {
+        if (typeof bot.chat === "function") {
+          bot.chat(`/msg ${target} ${line}`);
+        } else if (bot.write) {
+          bot.write("chat", { message: `/msg ${target} ${line}` });
+        }
+        log(rt, "chat", `<you → ${target}> ${line}`);
+      }
       history.push({ who: "me", text: line });
     } catch {
       // ignore
@@ -2150,11 +2317,27 @@ async function runBeamOnce(
     outcome = await (async (): Promise<
       "positive" | "negative" | "died" | "stopped"
     > => {
-    // Opener — send each line, then an interruptible gap. If the target
-    // replies at ANY point (during a gap or right after), handle it now.
+    // Opener — Randomize greetings and pitches to look human and avoid anti-spam
+    const greetings = ["hi", "hey", "yo", "sup", "hello"];
+    const pitches = [
+      "can u help me film a yt video",
+      "need some help recording a yt vid",
+      "could u help me film a video for my channel",
+      "u down to help me record a video"
+    ];
+    const reasons = [
+      "Cuz i got a challenge of a 2v2 if we win we will get a rankup",
+      "its a 2v2 challenge and we both get a rankup if we win",
+      "im doing a 2v2 challenge where we rank up if we win"
+    ];
+
+    const greet = greetings[Math.floor(Math.random() * greetings.length)];
+    const pitch = pitches[Math.floor(Math.random() * pitches.length)];
+    const reason = reasons[Math.floor(Math.random() * reasons.length)];
+
     rt.beamStage = `messaging ${target}`;
 
-    await whisper("hi", 0);
+    await whisper(greet, 0);
     if (await gapOrReply(1000)) {
       const o = await handleReply();
       if (o !== "continue") return settle(o);
@@ -2162,7 +2345,7 @@ async function runBeamOnce(
     else if (!rt.beamLoop) return "stopped";
 
     if (inbox.length <= consumed) {
-      await whisper("can u help me film a yt video", 0);
+      await whisper(pitch, 0);
       if (await gapOrReply(3000)) {
         const o = await handleReply();
         if (o !== "continue") return settle(o);
@@ -2171,10 +2354,7 @@ async function runBeamOnce(
     }
 
     if (inbox.length <= consumed) {
-      await whisper(
-        "Cuz i got a challenge of a 2v2 if we win we will get a rankup",
-        0,
-      );
+      await whisper(reason, 0);
       if (await gapOrReply(2600)) {
         const o = await handleReply();
         if (o !== "continue") return settle(o);
@@ -2208,7 +2388,9 @@ async function runBeamOnce(
     bot.removeListener("death", onDeath);
     bot.removeListener("playerLeft", onPlayerLeft);
     try {
-      bot.setControlState("forward", false);
+      if (typeof bot.setControlState === "function") {
+        bot.setControlState("forward", false);
+      }
     } catch {
       // ignore
     }

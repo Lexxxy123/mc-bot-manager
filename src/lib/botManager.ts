@@ -2193,7 +2193,7 @@ async function runBeamOnce(
       await whisper(`could u add my discord ${discordUser} pls, its starting soon`);
       if (died) return "died";
       if (!rt.beamLoop) return "stopped";
-      await whisper("then ill send the ip so u can hop on");
+      await whisper("then ill send the where to hop on");
       await whisper("thanks man");
       log(rt, "system", "🔆 Beam: closing script sent.");
 

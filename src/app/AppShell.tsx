@@ -43,6 +43,36 @@ export default function AppShell() {
     loadMe();
   }, [loadMe]);
 
+  // When the Discord OAuth tab (opened via target="_blank") finishes, it
+  // posts a message back so this preview refreshes its session.
+  useEffect(() => {
+    function onMessage(ev: MessageEvent) {
+      if (ev.data?.type === "mcbm:login-success") {
+        loadMe();
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [loadMe]);
+
+  // If WE are the OAuth landing tab (top-level, has an opener), notify the
+  // preview that started the flow and try to close ourselves.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("login") === "success" && window.opener) {
+      try {
+        window.opener.postMessage({ type: "mcbm:login-success" }, "*");
+      } catch {}
+      window.history.replaceState({}, "", "/");
+      setTimeout(() => {
+        try {
+          window.close();
+        } catch {}
+      }, 400);
+    }
+  }, []);
+
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setMe(null);
@@ -253,13 +283,21 @@ function LoginScreen({
 
         <div className="mt-7 space-y-3">
           {discordConfigured ? (
-            <a
-              href="/api/auth/discord/login"
-              className="group flex w-full items-center justify-center gap-2.5 rounded-xl bg-[#5865F2] px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-indigo-900/40 transition hover:bg-[#4752c4] active:scale-[.98]"
-            >
-              <DiscordIcon />
-              Continue with Discord
-            </a>
+            <>
+              <a
+                href="/api/auth/discord/login"
+                target="_blank"
+                rel="noopener"
+                className="group flex w-full items-center justify-center gap-2.5 rounded-xl bg-[#5865F2] px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-indigo-900/40 transition hover:bg-[#4752c4] active:scale-[.98]"
+              >
+                <DiscordIcon />
+                Continue with Discord
+              </a>
+              <p className="text-center text-[11px] leading-relaxed text-slate-500">
+                Opens in a new tab (Discord doesn&apos;t allow login inside an
+                embedded preview). Finish there — this page updates itself.
+              </p>
+            </>
           ) : (
             <div className="space-y-3">
               <div className="rounded-xl bg-amber-500/10 px-4 py-3 text-xs leading-relaxed text-amber-300 ring-1 ring-amber-500/20">

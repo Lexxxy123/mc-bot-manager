@@ -1,21 +1,13 @@
 import { NextResponse } from "next/server";
-import {
-  getOrCreateDevUser,
-  isDiscordConfigured,
-  attachSessionCookie,
-} from "@/lib/auth";
+import { getOrCreateDevUser, attachSessionCookie } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// Dev/guest login — only available when Discord OAuth is NOT configured.
+// Instant guest login. Discord OAuth stays available, but it cannot complete
+// inside an embedded preview (Discord blocks iframes, previews block new
+// tabs), so this path is always enabled.
 export async function POST(req: Request) {
-  if (isDiscordConfigured()) {
-    return NextResponse.json(
-      { error: "Dev login is disabled; use Discord." },
-      { status: 403 },
-    );
-  }
   let body: { name?: string };
   try {
     body = await req.json();

@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { db } from "@/db";
 import { bots, type Bot } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { startAzaleaBot, type AzaleaRuntime } from "@/lib/azaleaEngine";
 
 const globalForResume = globalThis as typeof globalThis & {
   __mcBotsResumed?: boolean;
@@ -53,6 +54,8 @@ type BotRuntime = {
   beamLoop: boolean;
   humanizer: ReturnType<typeof setTimeout> | null;
   nmpPlayers: Set<string>;
+  azaleaChild: import("child_process").ChildProcess | null;
+  azaleaSnap: import("@/app/types").ViewSnapshot | null;
 };
 
 const MAX_LOGS = 300;
@@ -82,6 +85,8 @@ function getOrCreateRuntime(id: string): BotRuntime {
       beamLoop: false,
       humanizer: null,
       nmpPlayers: new Set<string>(),
+      azaleaChild: null,
+      azaleaSnap: null,
     };
     runtimes.set(id, rt);
   }
@@ -624,6 +629,15 @@ export async function startBot(record: Bot): Promise<void> {
     }
     rt.bot = null;
   }
+  if (rt.azaleaChild) {
+    try {
+      rt.azaleaChild.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
+    rt.azaleaChild = null;
+  }
+  rt.azaleaSnap = null;
 
   rt.status = "connecting";
   rt.joined = false;
@@ -637,7 +651,14 @@ export async function startBot(record: Bot): Promise<void> {
   );
   await setDbStatus(record.id, "connecting");
 
-  // Route to the Raw NMP bypass engine if requested
+  // Route to the Azalea (Rust) sidecar or the raw NMP engine if requested.
+  if (record.engine === "azalea") {
+    return startAzaleaBot(record, rt as AzaleaRuntime, {
+      log,
+      setDbStatus,
+      resolveProfile,
+    });
+  }
   if (record.engine === "nmp") {
     return startRawNmpBot(record, rt);
   }
@@ -1003,6 +1024,15 @@ export async function stopBot(id: string): Promise<void> {
     }
     rt.bot = null;
   }
+  if (rt.azaleaChild) {
+    try {
+      rt.azaleaChild.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+    rt.azaleaChild = null;
+  }
+  rt.azaleaSnap = null;
   rt.status = "offline";
   rt.joined = false;
   await setDbStatus(id, "offline");
@@ -1152,6 +1182,10 @@ export function getViewSnapshot(id: string): ViewSnapshot | null {
   const rt = runtimes.get(id);
   if (!rt || !rt.bot || rt.status !== "online") {
     return null;
+  }
+
+  if (rt.azaleaSnap) {
+    return rt.azaleaSnap as ViewSnapshot;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -9,3 +9,4 @@ build
 pgdata
 Dockerfile
 .dockerignore
+azalea-bridge/target

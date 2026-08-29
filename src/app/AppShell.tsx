@@ -282,45 +282,36 @@ function LoginScreen({
         </div>
 
         <div className="mt-7 space-y-3">
-          {discordConfigured && (
-            <>
-              <a
-                href="/api/auth/discord/login"
-                target="_blank"
-                rel="noopener"
-                className="group flex w-full items-center justify-center gap-2.5 rounded-xl bg-[#5865F2] px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-indigo-900/40 transition hover:bg-[#4752c4] active:scale-[.98]"
-              >
-                <DiscordIcon />
-                Continue with Discord
-              </a>
-              <p className="text-center text-[11px] leading-relaxed text-amber-400/70">
-                Discord login opens a new tab — it only works on the public
-                deployment (embedded previews block it). Use instant login
-                below while previewing.
-              </p>
-              <div className="flex items-center gap-3 pt-1">
-                <div className="h-px flex-1 bg-slate-800" />
-                <span className="text-[11px] uppercase tracking-wider text-slate-600">
-                  or
-                </span>
-                <div className="h-px flex-1 bg-slate-800" />
+          {discordConfigured ? (
+            <a
+              href="/api/auth/discord/login"
+              className="group flex w-full items-center justify-center gap-2.5 rounded-xl bg-[#5865F2] px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-indigo-900/40 transition hover:bg-[#4752c4] active:scale-[.98]"
+            >
+              <DiscordIcon />
+              Continue with Discord
+            </a>
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded-xl bg-amber-500/10 px-4 py-3 text-xs leading-relaxed text-amber-300 ring-1 ring-amber-500/20">
+                Discord OAuth isn&apos;t configured. Use a quick guest login for
+                now:
               </div>
-            </>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && devLogin()}
+                placeholder="Pick a username"
+                className="w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none transition focus:border-emerald-500/60 focus:ring-2 focus:ring-emerald-500/20"
+              />
+              <button
+                onClick={devLogin}
+                disabled={busy}
+                className="w-full rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+              >
+                {busy ? "Signing in…" : "Continue as guest"}
+              </button>
+            </div>
           )}
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && devLogin()}
-            placeholder="Pick a username"
-            className="w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none transition focus:border-emerald-500/60 focus:ring-2 focus:ring-emerald-500/20"
-          />
-          <button
-            onClick={devLogin}
-            disabled={busy}
-            className="w-full rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
-          >
-            {busy ? "Signing in…" : "Sign in instantly →"}
-          </button>
         </div>
 
         <p className="mt-6 text-center text-[11px] text-slate-600">

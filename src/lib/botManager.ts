@@ -615,6 +615,20 @@ export async function startBot(record: Bot): Promise<void> {
   const rt = getOrCreateRuntime(record.id);
   rt.manualStop = false;
 
+  // A license is required for normal users even when a bot was created before
+  // licensing was enabled. This guard also protects automatic reconnects.
+  if (record.userId) {
+    const entitlement = await getBotEntitlementForUserId(record.userId);
+    if (!entitlement.allowed) {
+      rt.status = "offline";
+      rt.joined = false;
+      rt.lastError = LICENSE_REQUIRED_MESSAGE;
+      log(rt, "system", LICENSE_REQUIRED_MESSAGE);
+      await setDbStatus(record.id, "offline", LICENSE_REQUIRED_MESSAGE);
+      return;
+    }
+  }
+
   // Tear down any existing connection first.
   if (rt.bot) {
     try {
@@ -1442,7 +1456,7 @@ export async function selectHotbarSlot(
   }
 }
 
-export async function useHeldItem(id: string): Promise<BotActionResult> {
+export async function activateHeldItem(id: string): Promise<BotActionResult> {
   const rt = runtimes.get(id);
   if (!rt || !rt.bot || rt.status !== "online") {
     return { ok: false, message: "Bot is not online" };

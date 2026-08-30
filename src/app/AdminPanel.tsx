@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import AdminLicenseManager from "./AdminLicenseManager";
 
 type AdminUser = {
   id: string;
@@ -8,6 +9,9 @@ type AdminUser = {
   avatar: string | null;
   role: string;
   botSlots: number;
+  licenseSlots: number;
+  hasLicense: boolean;
+  licenseStatus: string | null;
   botCount: number;
   botsOnline: number;
   isGuest: boolean;
@@ -62,21 +66,6 @@ export default function AdminPanel({ meId }: { meId: string }) {
     if (res.ok) {
       const data = await res.json();
       setBots(data.bots ?? []);
-    }
-  }
-
-  async function setSlots(userId: string, botSlots: number) {
-    if (botSlots < 0) return;
-    setBusy(true);
-    try {
-      await fetch(`/api/admin/users/${userId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ botSlots }),
-      });
-      await refresh();
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -199,31 +188,26 @@ export default function AdminPanel({ meId }: { meId: string }) {
                       <span className="text-emerald-300">
                         {u.botsOnline} online
                       </span>{" "}
-                      · {u.botCount}/{u.botSlots} bots
+                      · {u.botCount}/{u.licenseSlots} bots
+                      {!u.hasLicense && (
+                        <span className="ml-1 text-amber-300">· license required</span>
+                      )}
                     </div>
                   </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 p-1">
-                    <button
-                      disabled={busy || u.botSlots <= 0}
-                      onClick={() => setSlots(u.id, u.botSlots - 1)}
-                      className="grid h-6 w-6 place-items-center rounded text-slate-300 hover:bg-slate-700 disabled:opacity-40"
-                    >
-                      −
-                    </button>
-                    <span className="min-w-[3.5rem] text-center text-xs text-slate-300">
-                      {u.botSlots} slots
-                    </span>
-                    <button
-                      disabled={busy}
-                      onClick={() => setSlots(u.id, u.botSlots + 1)}
-                      className="grid h-6 w-6 place-items-center rounded text-slate-300 hover:bg-slate-700 disabled:opacity-40"
-                    >
-                      +
-                    </button>
-                  </div>
+                  <span
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-medium ${
+                      u.hasLicense
+                        ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                        : "border-slate-700 bg-slate-800 text-slate-500"
+                    }`}
+                  >
+                    {u.hasLicense
+                      ? `${u.licenseSlots} licensed ${u.licenseSlots === 1 ? "slot" : "slots"}`
+                      : "No license"}
+                  </span>
 
                   <button
                     onClick={() => loadBots(u.id)}
@@ -305,6 +289,9 @@ export default function AdminPanel({ meId }: { meId: string }) {
           ))
         )}
       </div>
+
+      {/* License management intentionally sits below the user management area. */}
+      <AdminLicenseManager />
     </div>
   );
 }

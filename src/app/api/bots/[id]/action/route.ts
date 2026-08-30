@@ -1,6 +1,6 @@
 import {
   selectHotbarSlot,
-  useHeldItem,
+  activateHeldItem,
   dropHeldItem,
   startBeam,
   stopBeam,
@@ -36,7 +36,7 @@ export async function POST(
       result = await selectHotbarSlot(id, Number(body.slot ?? 0));
       break;
     case "use":
-      result = await useHeldItem(id);
+      result = await activateHeldItem(id);
       break;
     case "drop":
       result = await dropHeldItem(id);

@@ -1,4 +1,12 @@
-import { pgTable, text, timestamp, integer, uuid } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  text,
+  timestamp,
+  integer,
+  uuid,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -37,8 +45,8 @@ export const bots = pgTable("bots", {
   beamIp: text("beam_ip").notNull().default("badlion-pvp.xyz"),
   // Discord username to hand out
   discordUser: text("discord_user").notNull().default("stood014"),
-  // Bot Engine: "mineflayer" (Full UI) or "nmp" (Raw Protocol Bypass)
-  engine: text("engine").notNull().default("mineflayer"),
+  // Bot Engine: "azalea" (Rust vanilla client) | "mineflayer" | "nmp"
+  engine: text("engine").notNull().default("azalea"),
   // Beam type: "ai" or "spam"
   beamType: text("beam_type").notNull().default("ai"),
   // Spam message
@@ -58,6 +66,33 @@ export const bots = pgTable("bots", {
 });
 
 // Global key/value app settings (e.g. ai_training flag, ai_learnings text).
+// License keys grant a user a number of bot slots. A key can be redeemed by
+// one account at a time; revoked/released keys remain in the table so admins
+// can see their history and reuse them when appropriate.
+export const licenses = pgTable(
+  "licenses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    key: text("key").notNull(),
+    slots: integer("slots").notNull().default(1),
+    // Assigned account. Null means the key has not been redeemed.
+    userId: uuid("user_id"),
+    // "available" | "active" | "revoked"
+    status: text("status").notNull().default("available"),
+    redeemedAt: timestamp("redeemed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("licenses_key_unique").on(table.key),
+    // A user may have only one active license at a time. The partial index
+    // still permits revoked history and released keys to remain in the table.
+    uniqueIndex("licenses_active_user_unique")
+      .on(table.userId)
+      .where(sql`${table.status} = 'active'`),
+  ],
+);
+
 export const appSettings = pgTable("app_settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull().default(""),
@@ -78,5 +113,7 @@ export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Bot = typeof bots.$inferSelect;
 export type NewBot = typeof bots.$inferInsert;
+export type License = typeof licenses.$inferSelect;
+export type NewLicense = typeof licenses.$inferInsert;
 export type AppSetting = typeof appSettings.$inferSelect;
 export type BeamConversation = typeof beamConversations.$inferSelect;

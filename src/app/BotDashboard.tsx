@@ -57,10 +57,15 @@ const VERSIONS = [
   "1.8.9",
 ];
 
-export default function BotDashboard() {
+export default function BotDashboard({
+  onOpenLicense,
+}: {
+  onOpenLicense?: () => void;
+}) {
   const [tab, setTab] = useState<"bots" | "about">("bots");
   const [items, setItems] = useState<BotItem[]>([]);
   const [slots, setSlots] = useState<number>(0);
+  const [hasLicense, setHasLicense] = useState<boolean | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [activeBotId, setActiveBotId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
@@ -72,6 +77,9 @@ export default function BotDashboard() {
       const data = await res.json();
       setItems(data.bots ?? []);
       if (typeof data.slots === "number") setSlots(data.slots);
+      if (typeof data.hasLicense === "boolean") {
+        setHasLicense(data.hasLicense);
+      }
     } catch {
       /* ignore */
     } finally {
@@ -79,12 +87,21 @@ export default function BotDashboard() {
     }
   }, []);
 
-  const slotsFull = slots > 0 && items.length >= slots;
+  const noLicense = loaded && hasLicense === false;
+  const slotsFull =
+    noLicense || (slots > 0 && items.length >= slots);
 
   useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 2500);
-    return () => clearInterval(t);
+    const initialLoad = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    const t = window.setInterval(() => {
+      void refresh();
+    }, 2500);
+    return () => {
+      window.clearTimeout(initialLoad);
+      window.clearInterval(t);
+    };
   }, [refresh]);
 
   const activeBot = items.find((b) => b.id === activeBotId) ?? null;
@@ -96,7 +113,11 @@ export default function BotDashboard() {
         <div>
           <h2 className="text-lg font-semibold tracking-tight">My Bots</h2>
           <p className="text-sm text-slate-400">
-            {slots > 0 ? (
+            {noLicense ? (
+              <span className="font-medium text-amber-300">
+                you dont have any slot, you need to have a license to run your bots
+              </span>
+            ) : slots > 0 ? (
               <>
                 Using{" "}
                 <span
@@ -116,14 +137,20 @@ export default function BotDashboard() {
         <button
           onClick={() => setShowAdd(true)}
           disabled={slotsFull}
-          title={slotsFull ? "No bot slots left — ask an admin" : "Add a bot"}
+          title={
+            noLicense
+              ? "A license is required to add bots"
+              : slotsFull
+                ? "No bot slots left — ask an admin"
+                : "Add a bot"
+          }
           className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-emerald-950 shadow-lg shadow-emerald-900/30 transition hover:bg-emerald-400 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-40"
         >
           <span className="text-lg leading-none">＋</span> Add bot
         </button>
       </header>
 
-      {!activeBot ? (
+      {!activeBot || noLicense ? (
         <>
           <nav className="mt-6 flex gap-1 rounded-xl border border-slate-800 bg-slate-900/60 p-1 text-sm">
             {(["bots", "about"] as const).map((t) => (
@@ -141,7 +168,9 @@ export default function BotDashboard() {
             ))}
           </nav>
 
-          {tab === "bots" ? (
+          {tab === "bots" ? noLicense ? (
+            <LicenseRequiredState onOpenLicense={onOpenLicense} />
+          ) : (
             <section className="mt-6 animate-fade-in">
               {!loaded ? (
                 <p className="py-16 text-center text-slate-500">Loading…</p>
@@ -299,6 +328,21 @@ function BotCard({
               <span className="rounded-md bg-slate-800/60 px-1.5 py-0.5 text-xs text-slate-400">
                 {bot.version && bot.version !== "auto" ? bot.version : "auto"}
               </span>
+              <span
+                className={`rounded-md px-1.5 py-0.5 text-xs ${
+                  bot.engine === "azalea"
+                    ? "bg-orange-500/15 text-orange-300"
+                    : bot.engine === "nmp"
+                      ? "bg-sky-500/15 text-sky-300"
+                      : "bg-slate-800/60 text-slate-400"
+                }`}
+              >
+                {bot.engine === "azalea"
+                  ? "Azalea"
+                  : bot.engine === "nmp"
+                    ? "NMP"
+                    : "Mineflayer"}
+              </span>
               {bot.username && (
                 <>
                   <span className="text-slate-600">·</span>
@@ -367,6 +411,32 @@ function BotCard({
   );
 }
 
+function LicenseRequiredState({
+  onOpenLicense,
+}: {
+  onOpenLicense?: () => void;
+}) {
+  return (
+    <section className="mt-6 grid animate-fade-in place-items-center rounded-3xl border border-amber-500/20 bg-amber-500/[0.04] px-6 py-20 text-center">
+      <div className="grid h-20 w-20 place-items-center rounded-2xl bg-gradient-to-br from-amber-400/20 to-orange-500/20 text-4xl ring-1 ring-amber-500/30">
+        🔑
+      </div>
+      <h3 className="mt-5 text-lg font-semibold text-white">No bot slots available</h3>
+      <p className="mt-2 max-w-md text-sm leading-relaxed text-slate-400">
+        you dont have any slot, you need to have a license to run your bots
+      </p>
+      {onOpenLicense && (
+        <button
+          onClick={onOpenLicense}
+          className="mt-6 inline-flex items-center gap-2 rounded-xl bg-amber-400 px-5 py-2.5 text-sm font-semibold text-amber-950 shadow-lg shadow-orange-900/20 transition hover:bg-amber-300"
+        >
+          🔑 Open License
+        </button>
+      )}
+    </section>
+  );
+}
+
 function EmptyState({ onAdd }: { onAdd: () => void }) {
   return (
     <div className="grid animate-fade-in place-items-center rounded-3xl border border-dashed border-slate-700/60 bg-slate-900/30 px-6 py-20 text-center">
@@ -402,7 +472,7 @@ function AddBotModal({
   const [version, setVersion] = useState("auto");
   const [proxy, setProxy] = useState("");
   const [discordUser, setDiscordUser] = useState("stood014");
-  const [engine, setEngine] = useState("mineflayer");
+  const [engine, setEngine] = useState("azalea");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -500,7 +570,11 @@ function AddBotModal({
 
           <Field
             label="Minecraft version"
-            hint="Leave on Auto-detect first. If you get a 'socketClosed' disconnect, pick the server's exact version here — that fixes most join failures on proxy/anticheat networks."
+            hint={
+              engine === "azalea"
+                ? "Azalea always uses the latest vanilla protocol (Minecraft 26.1). This dropdown is ignored for Azalea bots. Use Mineflayer/NMP if you need to pin 1.8.9 or 1.20.1."
+                : "Leave on Auto-detect first. If you get a 'socketClosed' disconnect, pick the server's exact version here — that fixes most join failures on proxy/anticheat networks."
+            }
           >
             <select
               value={version}
@@ -542,16 +616,9 @@ function AddBotModal({
 
           <Field
             label="Bot Engine"
-            hint="Mineflayer includes Radar/Beam. Raw NMP uses your stealth bypass snippet (console only)."
+            hint="Azalea is a Rust Minecraft client (not npm/mineflayer). It speaks the latest vanilla protocol with real client physics. Competitive networks can still ban bots — this is not an anticheat bypass."
           >
-            <select
-              value={engine}
-              onChange={(e) => setEngine(e.target.value)}
-              className={inputClass}
-            >
-              <option value="mineflayer">Mineflayer (Full Features)</option>
-              <option value="nmp">Raw NMP (Stealth Bypass)</option>
-            </select>
+            <EnginePicker value={engine} onChange={setEngine} />
           </Field>
 
           {error && (
@@ -596,7 +663,9 @@ function AboutPanel() {
         </li>
         <li>
           The server validates the token against Minecraft services, resolves
-          your username, and connects with <code>mineflayer</code>.
+          your username, and connects with <b>Azalea</b> (Rust vanilla client),
+          Mineflayer, or raw <code>minecraft-protocol</code> — whichever engine
+          you picked.
         </li>
         <li>
           Each bot shows whether it <b>joined</b> the server, and you can open
@@ -653,18 +722,76 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <label className="block">
+    <div className="block">
       <span className="mb-1.5 block text-sm font-medium text-slate-300">
         {label}
       </span>
       {children}
       {hint && <span className="mt-1 block text-xs text-slate-500">{hint}</span>}
-    </label>
+    </div>
   );
 }
 
 const inputClass =
   "w-full rounded-xl border border-slate-700/80 bg-slate-950/60 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 outline-none transition focus:border-emerald-500/60 focus:bg-slate-950/80 focus:ring-2 focus:ring-emerald-500/20";
+
+const ENGINES: { id: string; title: string; blurb: string }[] = [
+  {
+    id: "azalea",
+    title: "Azalea (Rust)",
+    blurb: "Vanilla-like physics. Latest MC protocol. No npm/mineflayer.",
+  },
+  {
+    id: "mineflayer",
+    title: "Mineflayer",
+    blurb: "Full radar, inventory, beam. Fingerprinted on many PvP networks.",
+  },
+  {
+    id: "nmp",
+    title: "Raw NMP",
+    blurb: "Thin minecraft-protocol session. Console + chat only.",
+  },
+];
+
+function EnginePicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="grid gap-2">
+      {ENGINES.map((e) => {
+        const on = value === e.id;
+        return (
+          <button
+            key={e.id}
+            type="button"
+            onClick={() => onChange(e.id)}
+            className={`rounded-xl border px-3.5 py-2.5 text-left transition ${
+              on
+                ? "border-emerald-500/50 bg-emerald-500/10 ring-1 ring-emerald-500/30"
+                : "border-slate-700/80 bg-slate-950/60 hover:border-slate-500"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold text-slate-100">
+                {e.title}
+              </span>
+              {on && (
+                <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-400">
+                  selected
+                </span>
+              )}
+            </div>
+            <span className="mt-0.5 block text-xs text-slate-400">{e.blurb}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function logColor(level: LogEntry["level"]) {
   switch (level) {
@@ -701,6 +828,7 @@ export function EditBotModal({
   onSaved: () => void;
 }) {
   const [token, setToken] = useState("");
+  const [engine, setEngine] = useState(bot.engine || "azalea");
   const [version, setVersion] = useState(bot.version || "auto");
   const [host, setHost] = useState(bot.host);
   const [port, setPort] = useState(String(bot.port));
@@ -720,6 +848,7 @@ export function EditBotModal({
     setError(null);
     const payload: {
       token?: string;
+      engine?: string;
       version?: string;
       host?: string;
       port?: string;
@@ -734,6 +863,7 @@ export function EditBotModal({
       spamReplyMessage?: string;
     } = {};
     if (token.trim()) payload.token = token.trim();
+    if (engine !== bot.engine) payload.engine = engine;
     if (version !== bot.version) payload.version = version;
     if (host.trim() && host.trim() !== bot.host) payload.host = host.trim();
     if (port.trim() && Number(port) !== bot.port) payload.port = port.trim();
@@ -906,11 +1036,9 @@ export function EditBotModal({
 
           <Field
             label="Bot Engine"
-            hint="Mineflayer includes Radar/Beam. Raw NMP uses your stealth bypass snippet (console only)."
+            hint="Changing engine restarts the bot if it's running. Azalea ignores the pinned version and always uses latest vanilla (MC 26.1)."
           >
-            <div className="rounded-xl border border-slate-700/80 bg-slate-950/60 px-3.5 py-2.5 text-sm text-slate-400">
-              Only editable on creation. Delete and recreate to change engine.
-            </div>
+            <EnginePicker value={engine} onChange={setEngine} />
           </Field>
           
           <div className="border-t border-slate-800 pt-4 mt-4">

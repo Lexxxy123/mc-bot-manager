@@ -3,6 +3,11 @@ import { bots } from "@/db/schema";
 import { desc, eq } from "drizzle-orm";
 import { getRuntimeView, startBot, resumeEnabledBots } from "@/lib/botManager";
 import { getCurrentUser } from "@/lib/auth";
+import {
+  getBotEntitlement,
+  publicLicense,
+  LICENSE_REQUIRED_MESSAGE,
+} from "@/lib/licenses";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,7 +21,10 @@ export async function GET() {
   if (!user) {
     return Response.json({ error: "Not authenticated" }, { status: 401 });
   }
-  // Each user only sees their own bots.
+  const entitlement = await getBotEntitlement(user);
+
+  // Each user only sees their own bots. A missing license intentionally does
+  // not hide this list; the dashboard can explain how to unlock it.
   const rows = await db
     .select()
     .from(bots)
@@ -49,8 +57,11 @@ export async function GET() {
   });
   return Response.json({
     bots: data,
-    slots: user.botSlots,
+    slots: entitlement.slots,
     used: data.length,
+    hasLicense: entitlement.hasLicense,
+    license: publicLicense(entitlement.license),
+    isAdmin: entitlement.isAdmin,
   });
 }
 
@@ -60,15 +71,21 @@ export async function POST(req: Request) {
     return Response.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  // Enforce per-user bot-slot limit.
+  const entitlement = await getBotEntitlement(user);
+  if (!entitlement.allowed) {
+    return Response.json({ error: LICENSE_REQUIRED_MESSAGE }, { status: 403 });
+  }
+
+  // Enforce the number of slots granted by the active license (or the legacy
+  // admin allowance for the owner account).
   const owned = await db
     .select({ id: bots.id })
     .from(bots)
     .where(eq(bots.userId, user.id));
-  if (owned.length >= user.botSlots) {
+  if (owned.length >= entitlement.slots) {
     return Response.json(
       {
-        error: `You've used all ${user.botSlots} of your bot slots. Ask an admin for more.`,
+        error: `You've used all ${entitlement.slots} of your bot slots. Ask an admin for more.`,
       },
       { status: 403 },
     );
@@ -128,7 +145,10 @@ export async function POST(req: Request) {
   const ytChannel = (body.ytChannel ?? "").trim() || "Alight.z";
   const beamIp = (body.beamIp ?? "").trim() || "badlion-pvp.xyz";
   const discordUser = (body.discordUser ?? "").trim() || "stood014";
-  const engine = (body.engine === "nmp") ? "nmp" : "mineflayer";
+  const engine =
+    body.engine === "nmp" || body.engine === "azalea" || body.engine === "mineflayer"
+      ? body.engine
+      : "azalea";
   const beamType = (body.beamType === "spam") ? "spam" : "ai";
   const spamMessage = (body.spamMessage ?? "").trim() || "join my smp guys /msg me";
   const spamInterval = Number.isFinite(Number(body.spamInterval)) ? Number(body.spamInterval) : 60000;

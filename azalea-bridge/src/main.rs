@@ -375,6 +375,20 @@ fn snapshot(bot: &Client) -> Value {
         "dimension": "overworld",
         "timeOfDay": 0,
         "isDay": true,
+        "heldItem": null,
+        "lookingAt": null,
+        "entities": [],
+        "nearbyBlocks": [],
+        "hotbar": (0..9).map(|i| json!({
+            "slot": i,
+            "name": null,
+            "displayName": null,
+            "count": 0,
+            "selected": i == slot
+        })).collect::<Vec<_>>(),
+        "selectedSlot": slot,
+        "using": false,
+        "window": null
         "heldItem": held_item,
         "lookingAt": null,
         "entities": [],

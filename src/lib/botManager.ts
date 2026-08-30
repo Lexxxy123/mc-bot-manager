@@ -3,10 +3,6 @@ import { db } from "@/db";
 import { bots, type Bot } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { startAzaleaBot, type AzaleaRuntime } from "@/lib/azaleaEngine";
-import {
-  getBotEntitlementForUserId,
-  LICENSE_REQUIRED_MESSAGE,
-} from "@/lib/licenses";
 
 const globalForResume = globalThis as typeof globalThis & {
   __mcBotsResumed?: boolean;

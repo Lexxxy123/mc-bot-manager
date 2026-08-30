@@ -14,6 +14,7 @@ export type AzaleaRuntime = {
   joined: boolean;
   lastError: string | null;
   logs: LogEntry[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   bot: any | null;
   manualStop: boolean;
   nmpPlayers: Set<string>;
@@ -23,6 +24,7 @@ export type AzaleaRuntime = {
 
 type Helpers = {
   // Runtime is the botManager BotRuntime; keep this loose to avoid a cycle.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   log: (rt: any, level: LogEntry["level"], line: string) => void;
   setDbStatus: (
     id: string,
@@ -380,6 +382,7 @@ export async function startAzaleaBot(
     const rlErr = readline.createInterface({ input: child.stderr });
     rlErr.on("line", (line) => {
       const t = line.trim();
+      if (t) log(rt, "system", `[azalea] ${t}`);
       if (!t) return;
       if (isRecoverableExplosionDecodeWarning(t)) {
         if (!packetWarningLogged) {

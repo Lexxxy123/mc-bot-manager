@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1
-# Working version: nightly-2026-07-02 that started working on re-deploy
-# Includes fixed_bitset.rs patch for E0284
+# Fixed: unique stage names, nightly-2026-07-02 that worked, EPIPE fix, entitlement fix
 
-FROM rust:bookworm AS azalea
+FROM rust:bookworm AS rust-builder
 WORKDIR /src
 ENV CARGO_TERM_COLOR=always \
     CARGO_NET_GIT_FETCH_WITH_CLI=true \
@@ -33,26 +32,26 @@ RUN touch src/main.rs && \
     echo ">> SUCCESS - real binary built with nightly-2026-07-02" && \
     ls -lh /azalea-bridge
 
-FROM node:22-bookworm-slim AS base
+FROM node:22-bookworm-slim AS node-base
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
-FROM base AS deps
+FROM node-base AS deps
 COPY package.json package-lock.json ./
 RUN npm ci
 
-FROM base AS build
+FROM node-base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV DATABASE_URL=postgresql://placeholder:placeholder@127.0.0.1:5432/placeholder
 RUN npm run build
 
-FROM base AS runtime
+FROM node-base AS runtime
 ENV NODE_ENV=production
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
-COPY --from=azalea /azalea-bridge /usr/local/bin/azalea-bridge
+COPY --from=rust-builder /azalea-bridge /usr/local/bin/azalea-bridge
 COPY package.json package-lock.json next.config.ts tsconfig.json ./
 COPY drizzle.config.ts ./
 COPY src/db ./src/db

@@ -57,10 +57,15 @@ const VERSIONS = [
   "1.8.9",
 ];
 
-export default function BotDashboard() {
+export default function BotDashboard({
+  onOpenLicense,
+}: {
+  onOpenLicense?: () => void;
+}) {
   const [tab, setTab] = useState<"bots" | "about">("bots");
   const [items, setItems] = useState<BotItem[]>([]);
   const [slots, setSlots] = useState<number>(0);
+  const [hasLicense, setHasLicense] = useState<boolean | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [activeBotId, setActiveBotId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
@@ -72,6 +77,9 @@ export default function BotDashboard() {
       const data = await res.json();
       setItems(data.bots ?? []);
       if (typeof data.slots === "number") setSlots(data.slots);
+      if (typeof data.hasLicense === "boolean") {
+        setHasLicense(data.hasLicense);
+      }
     } catch {
       /* ignore */
     } finally {
@@ -79,12 +87,21 @@ export default function BotDashboard() {
     }
   }, []);
 
-  const slotsFull = slots > 0 && items.length >= slots;
+  const noLicense = loaded && hasLicense === false;
+  const slotsFull =
+    noLicense || (slots > 0 && items.length >= slots);
 
   useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 2500);
-    return () => clearInterval(t);
+    const initialLoad = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    const t = window.setInterval(() => {
+      void refresh();
+    }, 2500);
+    return () => {
+      window.clearTimeout(initialLoad);
+      window.clearInterval(t);
+    };
   }, [refresh]);
 
   const activeBot = items.find((b) => b.id === activeBotId) ?? null;
@@ -96,7 +113,11 @@ export default function BotDashboard() {
         <div>
           <h2 className="text-lg font-semibold tracking-tight">My Bots</h2>
           <p className="text-sm text-slate-400">
-            {slots > 0 ? (
+            {noLicense ? (
+              <span className="font-medium text-amber-300">
+                you dont have any slot, you need to have a license to run your bots
+              </span>
+            ) : slots > 0 ? (
               <>
                 Using{" "}
                 <span
@@ -116,14 +137,20 @@ export default function BotDashboard() {
         <button
           onClick={() => setShowAdd(true)}
           disabled={slotsFull}
-          title={slotsFull ? "No bot slots left — ask an admin" : "Add a bot"}
+          title={
+            noLicense
+              ? "A license is required to add bots"
+              : slotsFull
+                ? "No bot slots left — ask an admin"
+                : "Add a bot"
+          }
           className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-emerald-950 shadow-lg shadow-emerald-900/30 transition hover:bg-emerald-400 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-40"
         >
           <span className="text-lg leading-none">＋</span> Add bot
         </button>
       </header>
 
-      {!activeBot ? (
+      {!activeBot || noLicense ? (
         <>
           <nav className="mt-6 flex gap-1 rounded-xl border border-slate-800 bg-slate-900/60 p-1 text-sm">
             {(["bots", "about"] as const).map((t) => (
@@ -141,7 +168,9 @@ export default function BotDashboard() {
             ))}
           </nav>
 
-          {tab === "bots" ? (
+          {tab === "bots" ? noLicense ? (
+            <LicenseRequiredState onOpenLicense={onOpenLicense} />
+          ) : (
             <section className="mt-6 animate-fade-in">
               {!loaded ? (
                 <p className="py-16 text-center text-slate-500">Loading…</p>
@@ -379,6 +408,32 @@ function BotCard({
         </p>
       )}
     </li>
+  );
+}
+
+function LicenseRequiredState({
+  onOpenLicense,
+}: {
+  onOpenLicense?: () => void;
+}) {
+  return (
+    <section className="mt-6 grid animate-fade-in place-items-center rounded-3xl border border-amber-500/20 bg-amber-500/[0.04] px-6 py-20 text-center">
+      <div className="grid h-20 w-20 place-items-center rounded-2xl bg-gradient-to-br from-amber-400/20 to-orange-500/20 text-4xl ring-1 ring-amber-500/30">
+        🔑
+      </div>
+      <h3 className="mt-5 text-lg font-semibold text-white">No bot slots available</h3>
+      <p className="mt-2 max-w-md text-sm leading-relaxed text-slate-400">
+        you dont have any slot, you need to have a license to run your bots
+      </p>
+      {onOpenLicense && (
+        <button
+          onClick={onOpenLicense}
+          className="mt-6 inline-flex items-center gap-2 rounded-xl bg-amber-400 px-5 py-2.5 text-sm font-semibold text-amber-950 shadow-lg shadow-orange-900/20 transition hover:bg-amber-300"
+        >
+          🔑 Open License
+        </button>
+      )}
+    </section>
   );
 }
 

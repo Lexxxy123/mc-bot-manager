@@ -45,9 +45,17 @@ export default function BotDetailView({
   }, [bot.id, tab]);
 
   useEffect(() => {
-    poll();
-    const t = setInterval(poll, tab === "console" ? 1500 : 700);
-    return () => clearInterval(t);
+    const initialPoll = window.setTimeout(() => {
+      void poll();
+    }, 0);
+    const t = window.setInterval(
+      () => void poll(),
+      tab === "console" ? 1500 : 700,
+    );
+    return () => {
+      window.clearTimeout(initialPoll);
+      window.clearInterval(t);
+    };
   }, [poll, tab]);
 
   useEffect(() => {

@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { users, bots } from "@/db/schema";
+import { users, bots, licenses } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { stopBot } from "@/lib/botManager";
@@ -72,6 +72,17 @@ export async function DELETE(
     await stopBot(b.id);
   }
   await db.delete(bots).where(eq(bots.userId, id));
+  // Do not leave an active key attached to a deleted account. Return it to the
+  // available pool so an administrator can safely hand it to another user.
+  await db
+    .update(licenses)
+    .set({
+      userId: null,
+      status: "available",
+      redeemedAt: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(licenses.userId, id));
   await db.delete(users).where(eq(users.id, id));
   return Response.json({ ok: true });
 }

@@ -158,6 +158,15 @@ class AzaleaHandle extends EventEmitter {
   }
 }
 
+function isRecoverableExplosionDecodeWarning(line: string): boolean {
+  const normalized = line.toLowerCase();
+  return (
+    normalized.includes("azalea_client::plugins::connection") &&
+    normalized.includes("error reading packet explode") &&
+    normalized.includes("failed to fill whole buffer")
+  );
+}
+
 export async function startAzaleaBot(
   record: Bot,
   rt: AzaleaRuntime,
@@ -206,6 +215,10 @@ export async function startAzaleaBot(
 
   const child = spawn(bin, [], {
     stdio: ["pipe", "pipe", "pipe"],
+    // Keep the bridge's stderr at the default warning level. The connection
+    // callback below turns the known packet-decode warning into one useful
+    // dashboard log entry instead of dropping it or treating it as a fatal
+    // disconnect.
     env: { ...process.env, RUST_LOG: process.env.RUST_LOG || "warn" },
   });
   rt.azaleaChild = child;
@@ -232,6 +245,7 @@ export async function startAzaleaBot(
     child.once("spawn", writeStart);
   }
 
+  let packetWarningLogged = false;
   const onLine = (line: string) => {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -328,6 +342,16 @@ export async function startAzaleaBot(
         handle.health = snap.health || 20;
         handle.food = snap.food || 20;
         handle.quickBarSlot = snap.selectedSlot || 0;
+        const selectedItem = (snap.hotbar ?? []).find(
+          (item) => item.slot === snap.selectedSlot && item.name,
+        );
+        handle.heldItem = selectedItem?.name
+          ? {
+              name: selectedItem.name,
+              displayName: selectedItem.displayName || selectedItem.name,
+              count: selectedItem.count,
+            }
+          : null;
         break;
       }
       case "end":
@@ -359,6 +383,19 @@ export async function startAzaleaBot(
     rlErr.on("line", (line) => {
       const t = line.trim();
       if (t) log(rt, "system", `[azalea] ${t}`);
+      if (!t) return;
+      if (isRecoverableExplosionDecodeWarning(t)) {
+        if (!packetWarningLogged) {
+          packetWarningLogged = true;
+          log(
+            rt,
+            "system",
+            "[azalea] Warning: the server sent an incomplete explosion packet (id 36). The bot is still connected; this usually means the server or ViaVersion protocol translation does not match the 26.1 client. Check the server protocol/ViaVersion configuration if gameplay or inventory updates are incomplete.",
+          );
+        }
+        return;
+      }
+      log(rt, "system", `[azalea] ${t}`);
     });
   }
 

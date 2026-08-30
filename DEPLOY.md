@@ -6,6 +6,7 @@ and a `start.sh` that waits for Postgres and pushes the schema automatically.
 baked into `src/lib/config.ts`** (env vars override them if you ever want).
 
 > ⚠️ Use the branch **`arena/01a04ee5-mc-bot-manager`** — it contains Azalea
+> ⚠️ Use the branch **`arena/01a05167-mc-bot-manager`** — it contains Azalea
 > (Rust client) plus the GUI/engine picker. First Docker build compiles Azalea
 > and can take 10–20 minutes.
 
@@ -17,6 +18,7 @@ baked into `src/lib/config.ts`** (env vars override them if you ever want).
    - Select the repo, and when the service is created open
      **Settings → Source → Branch** and set it to
      `arena/01a04ee5-mc-bot-manager`.
+     `arena/01a05167-mc-bot-manager`.
 2. In the project: **+ New → Database → Add PostgreSQL**.
 3. Make sure the web service can see the DB URL (most new projects share it
    automatically as `DATABASE_URL`). If the deploy log says

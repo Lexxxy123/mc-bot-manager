@@ -15,9 +15,10 @@ use std::{
 };
 
 use azalea::{
+    account::AccountTrait,
     prelude::*,
     protocol::connect::Proxy,
-    AccountTrait, ClientInformation, JoinOpts,
+    ClientInformation, JoinOpts,
 };
 use azalea_auth::sessionserver::{
     join as session_join, ClientSessionServerError, SessionServerJoinOpts,

@@ -2,6 +2,7 @@
 name = "azalea-bridge"
 version = "0.1.0"
 edition = "2021"
+description = "JSON-lines sidecar that drives an Azalea (Rust) Minecraft client for MC Bot Manager"
 
 [dependencies]
 azalea = { version = "0.16.0", default-features = true }
@@ -20,3 +21,5 @@ uuid = { version = "1", features = ["serde"] }
 lto = false
 codegen-units = 8
 opt-level = 3
+debug = false
+strip = true
